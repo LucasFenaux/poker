@@ -120,7 +120,7 @@ class PPO(OnPolicyAlgorithm):
         for i in range(self.sgd_steps):
             # compute what we need
             self.value_optimizer.zero_grad()
-            value_function = self.value_network(states).squeeze()
+            value_function = self.value_network(*states).squeeze()
             # value_function = normalize_rewards(value_function, self.env_name)
             # we normalize after here because we need to preserve the sign of the advantage so we cannot mean/std batch normalize it as that might shift it
             advantages = batch_rewards - value_function.clone().detach()
@@ -159,8 +159,8 @@ class PPO(OnPolicyAlgorithm):
         return {"loss": loss, "value_loss": value_loss}
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
-        policy = self.get_model_policy(self.network, *state, rnn_state=rnn_state)
-        return policy.sample()
+        policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)
+        return policy.sample().cpu()
 
     def get_model_policy(self, network, state: (pokerkit.State, int), rnn_state = None) -> Union[Categorical, Normal]:
         if self.discrete:

@@ -6,6 +6,57 @@ It is trainable and should be part of the model.
 import torch
 import torch.nn as nn
 import pokerkit
+import copy
+from dataclasses import dataclass
+from typing import Optional, Union
+
+
+@dataclass(slots=True)
+class StateSnapshot:
+    hole_cards: str
+    board_cards: str
+    player_count: int
+    blinds_or_straddles: tuple[int, ...]
+    bets: list[float]
+    stacks: list[float]
+    in_hand: list[bool]
+    pots: list[float]  # We will store just the raw amounts here
+    min_bet: Optional[float]
+    max_bet: Optional[float]
+
+
+def extract_state_snapshot(state, current_actor) -> StateSnapshot:
+    """Creates a tiny, memory-efficient dataclass of the current table state."""
+
+    cards = state.hole_cards[current_actor]
+    cards = "".join([repr(card) for card in cards])
+    if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
+        board_cards = copy.deepcopy(
+            state.board_cards[0])  # we will never encounter multiple boards when making decisions
+    elif len(state.board_cards) > 0:
+        raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
+    else:
+        board_cards = []
+    to_add = 5 - len(board_cards)
+
+    board_cards = "".join([repr(card) for card in board_cards] + ["??"] * to_add)
+
+    return StateSnapshot(
+        hole_cards=cards,
+        board_cards=board_cards,
+        player_count=state.player_count,
+        blinds_or_straddles=tuple(state.blinds_or_straddles),
+        bets=list(state.bets),
+        stacks=list(state.stacks),
+        in_hand=list(state.statuses),
+        pots=[p.amount for p in state.pots] if state.pots else [],  # Extract raw numbers instantly
+        min_bet=state.min_completion_betting_or_raising_to_amount,
+        max_bet=state.max_completion_betting_or_raising_to_amount
+    )
+
+def safe_div(a, b, default=0):
+    return a / b if (b is not None and b != 0) else default
+
 
 class CardEmbedding(nn.Module):
     rank_mapping = {
@@ -60,52 +111,115 @@ class StateInterpreter(nn.Module):
     def __init__(self, device, rank_dim: int = 16, suit_dim: int = 4, max_num_players: int = 9):
         super().__init__()
         self.device = device
+        self.num_player_embedding_size = 4
+        self.rel_to_button_embedding_size = 4
 
         self.rank_dim = rank_dim
         self.suit_dim = suit_dim
         self.card_embedding = CardEmbedding(rank_dim, suit_dim).to(device)
-
         self.max_num_players = max_num_players
-        self.num_player_embedding = nn.Embedding(max_num_players, max_num_players)
+        self.num_player_embedding = nn.Embedding(max_num_players, self.num_player_embedding_size)
 
-        self.rel_to_button_embedding = nn.Embedding(max_num_players, max_num_players)
+        self.rel_to_button_embedding = nn.Embedding(max_num_players, self.rel_to_button_embedding_size)
 
     def expected_input_size(self):
-        size = self.rank_dim + self.suit_dim + (self.max_num_players * 2)  # embedding dimensions
+        size = (self.rank_dim + self.suit_dim) * 2  # the 2 player cards
+        size += (self.rank_dim + self.suit_dim) * 5   # the 5 board cards
         size += 10  # sb, bb, pot, min_bet, max_bet features
         size += 13 * self.max_num_players   # player features
+        size += self.rel_to_button_embedding_size * self.max_num_players  # rel to button features
+        size += self.num_player_embedding_size
         size += 6 * self.max_num_players   # table state + player mask
         return size
 
-    def forward(self, state: pokerkit.State, current_actor: int):
+    def forward(self, state: Union[pokerkit.State,StateSnapshot], current_actor: int):
+        # --- Handle both Live States and Training Snapshots ---
+        if isinstance(state, StateSnapshot):
+            # Training Mode: Clean dot-notation access!
+            cards = state.hole_cards
+            board_cards = state.board_cards
+            num_players = state.player_count
+            sb, bb = state.blinds_or_straddles
+            bets = state.bets
+            stacks = state.stacks
+            in_hand = state.in_hand
+
+            # Since we extracted the float amounts in the dataclass:
+            pot = sum(bets) + sum(state.pots)
+
+            min_bet = state.min_bet
+            max_bet = state.max_bet
+
+        else:
+            # Live Gameplay Mode (same as before)
+            cards = state.hole_cards[current_actor]
+            cards = "".join([repr(card) for card in cards])
+            if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
+                board_cards = copy.deepcopy(state.board_cards[0])  # we will never encounter multiple boards when making decisions
+            elif len(state.board_cards) > 0:
+                raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
+            else:
+                board_cards = []
+            to_add = 5 - len(board_cards)
+
+            board_cards = "".join([repr(card) for card in board_cards] + ["??"] * to_add)
+            # board_cards = "".join([repr(card) for card in board_cards_list])
+
+            num_players = state.player_count
+            sb, bb = state.blinds_or_straddles
+            bets = list(state.bets)
+            stacks = list(state.stacks)
+            in_hand = list(state.statuses)
+
+            # Live mode calculates the pot amounts on the fly
+            pot = sum(bets) + sum(p.amount for p in (state.pots or []))
+
+            min_bet = state.min_completion_betting_or_raising_to_amount
+            max_bet = state.max_completion_betting_or_raising_to_amount
+
         # that player's cards
-        cards = state.hole_cards[current_actor]
-        cards = "".join([repr(card) for card in cards])
+        # bets = copy.deepcopy(state.bets)
+        # stacks = copy.deepcopy(state.stacks)
+        # in_hand = copy.deepcopy(state.statuses)
+        # cards = copy.deepcopy(state.hole_cards[current_actor])
+        # pots = copy.deepcopy(tuple(state.pots) if state.pots is not None else [])
+        #
+        # cards = "".join([repr(card) for card in cards])
 
         # the current board (+ any unknown cards)
-        board_cards = state.board_cards[0]  # we will never encounter multiple boards when making decisions
-        to_add = 5 - len(board_cards)
+        # if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
+        #     board_cards = copy.deepcopy(state.board_cards[0])  # we will never encounter multiple boards when making decisions
+        # elif len(state.board_cards) > 0:
+        #     raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
+        # else:
+        #     board_cards = []
+        # to_add = 5 - len(board_cards)
+        #
+        # board_cards = "".join([repr(card) for card in board_cards] + ["??"] * to_add)
 
-        board_cards = "".join([repr(card) for card in board_cards] + ["??"] * to_add)
-
-        num_players = state.player_count
+        # num_players = state.player_count
 
         # blind info
-        sb, bb = state.blinds_or_straddles
+        # sb, bb = state.blinds_or_straddles
 
         # pot info
-        pot = sum(list(state.pot_amounts))  # for now ignore side-pots TODO: handle side-pots
+        # pot = sum(list(state.pot_amounts))  # for now ignore side-pots TODO: handle side-pots
+        # turns out pokerkit pot only updates at the end of bet collection
+        # pot = sum(bets) + sum(p.amount for p in (pots or []))
 
         # min/max bet info
-        min_bet = state.min_completion_betting_or_raising_to_amount
+        # min_bet = state.min_completion_betting_or_raising_to_amount
+        if min_bet is None:
+            min_bet = max(bets)
 
-        max_bet = state.max_completion_betting_or_raising_to_amount
+        # max_bet = state.max_completion_betting_or_raising_to_amount
+
+        if max_bet is None:
+            max_bet = min_bet  # Or some other logical fallback
 
         # player info
         # collecting all the info
-        bets = state.bets
-        stacks = state.stacks
-        in_hand = state.statuses
+
         is_button = [i == num_players - 1 for i in range(num_players)]
         is_sb =  [i == 0 for i in range(num_players)]
         is_bb =  [i == 1 for i in range(num_players)]
@@ -171,19 +285,20 @@ class StateInterpreter(nn.Module):
 
         # we will need the max stack for future computations
         max_stack = max(stacks)
+        assert max_stack > 0, print("all stacks cannot be 0 otherwise all players are already all in and there is no decision to make")
 
         # embed player cards
         player_ranks, player_suits = self.card_embedding.parse_cards(player_cards)
         player_ranks, player_suits = player_ranks.to(self.device), player_suits.to(self.device)
-        player_card_embeddings = self.card_embedding(player_ranks, player_suits)
+        player_card_embeddings = self.card_embedding(player_ranks, player_suits).flatten()
 
         # embed board cards
         board_ranks, board_suits = self.card_embedding.parse_cards(board_cards)
         board_ranks, board_suits = board_ranks.to(self.device), board_suits.to(self.device)
-        board_card_embeddings = self.card_embedding(board_ranks, board_suits)
+        board_card_embeddings = self.card_embedding(board_ranks, board_suits).flatten()
 
         # embed num players
-        num_player_embeddings = self.num_player_embedding(num_players)
+        num_player_embeddings = self.num_player_embedding(torch.tensor(num_players, dtype=torch.long).to(self.device)).flatten()
 
         # compute sb features
         # compute the ratio of the small blind to the pot
@@ -221,7 +336,7 @@ class StateInterpreter(nn.Module):
 
         # compute pot features
         # we compute the ratio of the pot to the max stack
-        pot_to_max_stack = pot / max_stack
+        pot_to_max_stack = safe_div(pot, max_stack, default=None)
 
         features.append(pot_to_max_stack)
 
@@ -241,15 +356,13 @@ class StateInterpreter(nn.Module):
                 # - the ratio of the bet to the min_bet
                 # - the ratio of the bet to the max_bet
 
-                bet_to_stack = bet / stack
-                bet_to_max_stack = bet / max_stack
+                bet_to_stack = safe_div(bet, stack)   # happen when player is all-in
+                bet_to_max_stack = safe_div(bet, max_stack, None) # can only happen when every player is all in
                 bet_to_pot = bet / pot
-                sb_to_bet = small_blind / bet
-                bb_to_bet = big_blind / bet
-                if min_bet == 0:
-                    bet_to_min_bet = 0
-                else:
-                    bet_to_min_bet = bet / min_bet
+                sb_to_bet = safe_div(small_blind, bet)
+                bb_to_bet = safe_div(big_blind, bet)
+
+                bet_to_min_bet = bet / min_bet
                 bet_to_max_bet = bet / max_bet
 
                 # compute stacks features
@@ -259,12 +372,12 @@ class StateInterpreter(nn.Module):
                 # - the ratio of the big blind to the stack
                 # - the ratio of the min bet to the stack
                 # - the ratio of the max bet to the stack
-                stack_to_max_stack = stack / max_stack
-                pot_to_stack = pot / stack
-                sb_to_stack = small_blind / stack
-                bb_to_stack = big_blind / stack
-                min_bet_to_stack = min_bet / stack
-                max_bet_to_stack = max_bet / stack
+                stack_to_max_stack = safe_div(stack, max_stack, None)
+                pot_to_stack = safe_div(pot, stack, 0)
+                sb_to_stack = safe_div(small_blind, stack, 0)
+                bb_to_stack = safe_div(big_blind, stack, 0)
+                min_bet_to_stack = safe_div(min_bet, stack, 0)
+                max_bet_to_stack = safe_div(max_bet, stack, 0)
 
                 features.extend([bet_to_stack, bet_to_max_stack, bet_to_pot, sb_to_bet, bb_to_bet, bet_to_min_bet,
                                  bet_to_max_bet, stack_to_max_stack, pot_to_stack, sb_to_stack, bb_to_stack,
@@ -273,11 +386,11 @@ class StateInterpreter(nn.Module):
                 features.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
         # convert boolean features
-        in_hand = torch.tensor(in_hand, dtype=torch.float32).to(self.device)
-        is_button = torch.tensor(is_button, dtype=torch.float32).to(self.device)
-        is_sb = torch.tensor(is_sb, dtype=torch.float32).to(self.device)
-        is_bb = torch.tensor(is_bb, dtype=torch.float32).to(self.device)
-        all_in = torch.tensor(all_in, dtype=torch.float32).to(self.device)
+        in_hand = torch.tensor(in_hand, dtype=torch.float32).to(self.device).flatten()
+        is_button = torch.tensor(is_button, dtype=torch.float32).to(self.device).flatten()
+        is_sb = torch.tensor(is_sb, dtype=torch.float32).to(self.device).flatten()
+        is_bb = torch.tensor(is_bb, dtype=torch.float32).to(self.device).flatten()
+        all_in = torch.tensor(all_in, dtype=torch.float32).to(self.device).flatten()
 
         # embed relative position to button
         rel_to_button = torch.tensor(rel_to_button, dtype=torch.long).to(self.device)
@@ -285,18 +398,18 @@ class StateInterpreter(nn.Module):
 
         # convert the player mask to a tensor so we can use it to zero out non-existent player's embeddings
         player_mask = torch.tensor(player_mask, dtype=torch.float32).to(self.device)
-        rel_to_button_embedding = rel_to_button_embedding * player_mask.unsqueeze(-1)
+        rel_to_button_embedding = (rel_to_button_embedding * player_mask.unsqueeze(-1)).flatten()
 
         # we finally concat everything to make the final feature vector
-        features = torch.tensor(features, dtype=torch.float32).to(self.device)
+        features = torch.tensor(features, dtype=torch.float32).to(self.device).flatten()
 
         input_features = torch.cat([features, player_card_embeddings, board_card_embeddings, num_player_embeddings,
-                                    in_hand, is_button, is_sb, is_bb, is_bb, all_in, rel_to_button_embedding,
+                                    in_hand, is_button, is_sb, is_bb, all_in, rel_to_button_embedding,
                                     player_mask], dim=0).to(self.device).contiguous()
 
-        assert input_features.shape[0] == self._expected_input_size(), print(f"Input size {input_features.shape[0]} does"
+        assert input_features.shape[0] == self.expected_input_size(), print(f"Input size {input_features.shape[0]} does"
                                                                              f" not match expected input size "
-                                                                             f"{self._expected_input_size()}")
+                                                                             f"{self.expected_input_size()}")
         return input_features
 
 

@@ -59,9 +59,21 @@ class ValueModel(nn.Module):
                                  nn.Linear(16, 1))
 
 
-    def forward(self, state: pokerkit.State, current_actor: int):
-        feature_vector = self.interpreter(state, current_actor)
+    def _forward(self, feature_vector: torch.Tensor):
         return self.net(feature_vector)
+
+    def forward(self, state: Union[pokerkit.State, list[pokerkit.State]], current_actor: Union[int, list[int]]):
+        if isinstance(state, pokerkit.State) and isinstance(current_actor, int):
+            feature_vector = self.interpreter(state, current_actor)
+        elif isinstance(state, list) and isinstance(current_actor, list):
+            feature_vector = []
+            for state, current_actor in zip(state, current_actor):
+                feature_vector.append(self.interpreter(state, current_actor))
+            feature_vector = torch.stack(feature_vector)
+        else:
+            raise NotImplementedError
+
+        return self._forward(feature_vector)
 
 
 def get_value_model(device: torch.device) -> ValueModel:

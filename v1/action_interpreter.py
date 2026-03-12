@@ -10,11 +10,11 @@ class Action(Enum):
     @classmethod
     def decide_action(cls, action):
         # we assume the action has been passed through a Sigmoid or some other 0,1 bounding function
-        if action < -1/2:
+        if action < 0:
             return cls.CHECK_OR_FOLD
-        elif action < 0:
-            return cls.CHECK_OR_CALL
         elif action < 1/2:
+            return cls.CHECK_OR_CALL
+        elif action < 3/4:
             return cls.RAISE
         else:
             return cls.ALL_IN
@@ -41,15 +41,15 @@ class ActionInterpreter(nn.Module):
         # we squash both the action and the bet sizing and use the bet sizing as the slider between min and max bet
 
         if len(x.shape) == 1:
-            action = Action.decide_action(self.squashing_fn(x[0]))
-            bet_sizing = self.squashing_fn(x[1])
+            action = Action.decide_action(self.squashing_fn(x[0]).item())
+            bet_sizing = self.squashing_fn(x[1]).item()
             bet_sizing = bet_size_scaling(bet_sizing)
 
         else:
             action = self.squashing_fn(x[:, 0])
-            action = [Action.decide_action(x) for x in action]
+            action = [Action.decide_action(x.item()) for x in action]
             bet_sizing = self.squashing_fn(x[:, 1])
-            bet_sizing = [bet_size_scaling(x) for x in bet_sizing]
+            bet_sizing = [bet_size_scaling(x.item()) for x in bet_sizing]
 
         return action, bet_sizing
 
