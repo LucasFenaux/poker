@@ -1,22 +1,48 @@
 import ray
+import torch
+import pokerkit
+from typing import Union
 from global_settings import NUM_PLAYERS
 from models import load_model
+from alg import PPO, OnPolicyAlgorithm
 
 
-@ray.remote(num_cpus=1, num_gpus=float(1/NUM_PLAYERS))
+@ray.remote(num_cpus=0.5, num_gpus=float(1/NUM_PLAYERS))
 class PlayerActor:
-    def __init__(self, player_id: int):
+    def __init__(self, player_id: int, device: torch.device, deterministic: bool = False):
         self.player_id = player_id
-        self.model = load_model(player_id)
-        self.alg = None
-        self.buffer = []
+        self.deterministic = deterministic
+        self.model = load_model(player_id, device, deterministic).to(device)
+        self.alg = PPO(self.model, device=device, discrete=deterministic, **PPO.default_hyperparameters)
+        self.buffer = None
+        self.batch_states = []
+        self.batch_current_actors = []
+        self.batch_rewards = []
+        self.batch_actions = []
+        self.gamma = 0.99
+        self.batch_size = 5000
 
-    def act(self, state):
-        return None
+    def get_action(self, state: pokerkit.State, current_actor: int):
+        return self.alg.get_action(state, current_actor)
 
-    def store_transition(self, state, action, reward, done):
-        self.buffer.append((state, action, reward, done))
+    def store_hand(self, states, current_actors, actions, reward):
+        assert len(states) == len(actions) == len(current_actors)
+        if isinstance(self.alg, OnPolicyAlgorithm):
+            # there is no notion of discounting rewards in a hand of poker
+            # since rewards always come at a specific time and when the player gets
+            # the reward is irrelevant
+            rewards = [reward] * len(states)
+
+            self.batch_states.extend(states)
+            self.batch_current_actors.extend(current_actors)
+            self.batch_rewards.extend(rewards)
+            self.batch_actions.extend(actions)
+        else:
+            raise NotImplementedError
 
     def update(self):
-        self.alg.update(self.buffer)
-
+        if isinstance(self.alg, OnPolicyAlgorithm):
+            if len(self.batch_states) >= self.batch_size:
+                # we need batch_states, batch_rewards, and batch_actions
+                self.alg.update((self.batch_states, self.batch_current_actors), self.batch_rewards, self.batch_actions)
+                self.batch_states, self.batch_current_actors, self.batch_rewards, self.batch_actions = [], [], [], []

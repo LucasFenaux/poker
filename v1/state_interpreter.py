@@ -56,7 +56,7 @@ class CardEmbedding(nn.Module):
 
 
 
-class Interpreter(nn.Module):
+class StateInterpreter(nn.Module):
     def __init__(self, device, rank_dim: int = 16, suit_dim: int = 4, max_num_players: int = 9):
         super().__init__()
         self.device = device
@@ -66,9 +66,16 @@ class Interpreter(nn.Module):
         self.card_embedding = CardEmbedding(rank_dim, suit_dim).to(device)
 
         self.max_num_players = max_num_players
-        self.num_player_embedding = nn.Embedding(max_num_players, 4)
+        self.num_player_embedding = nn.Embedding(max_num_players, max_num_players)
 
+        self.rel_to_button_embedding = nn.Embedding(max_num_players, max_num_players)
 
+    def expected_input_size(self):
+        size = self.rank_dim + self.suit_dim + (self.max_num_players * 2)  # embedding dimensions
+        size += 10  # sb, bb, pot, min_bet, max_bet features
+        size += 13 * self.max_num_players   # player features
+        size += 6 * self.max_num_players   # table state + player mask
+        return size
 
     def forward(self, state: pokerkit.State, current_actor: int):
         # that player's cards
@@ -88,6 +95,11 @@ class Interpreter(nn.Module):
 
         # pot info
         pot = sum(list(state.pot_amounts))  # for now ignore side-pots TODO: handle side-pots
+
+        # min/max bet info
+        min_bet = state.min_completion_betting_or_raising_to_amount
+
+        max_bet = state.max_completion_betting_or_raising_to_amount
 
         # player info
         # collecting all the info
@@ -130,16 +142,18 @@ class Interpreter(nn.Module):
         rel_to_button = pad_list(rel_to_button, 0)
 
         return self._embed_forward(player_cards=cards, board_cards=board_cards, num_players=num_players,
-                                   small_blind=sb, big_blind=bb, pot=pot, bets=bets, stacks=stacks, in_hand=in_hand,
+                                   small_blind=sb, big_blind=bb, min_bet=min_bet, max_bet=max_bet, pot=pot,
+                                   bets=bets, stacks=stacks, in_hand=in_hand,
                                    is_button=is_button, is_sb=is_sb, is_bb=is_bb, all_in=all_in,
                                    rel_to_button=rel_to_button, player_mask=player_mask)
-
 
     def _embed_forward(self, player_cards: str,  # need to embed
                        board_cards: str,   # need to embed
                        num_players: int,   # need to embed
                        small_blind: float,  # need to compute features from
                        big_blind: float,   # need to compute features from
+                       min_bet: float,  # need to compute features from
+                       max_bet: float,  # need to compute features from
                        pot: float,   # need to compute features from
                        bets: list[float],  # need to compute features from
                        stacks: list[float],  # need to compute features from
@@ -186,6 +200,25 @@ class Interpreter(nn.Module):
 
         features.append(bb_to_pot)
 
+        # compute the min bet features
+        sb_to_min_bet = small_blind / min_bet
+        bb_to_min_bet = big_blind / min_bet
+        min_bet_to_pot = min_bet / pot
+        min_bet_to_max_bet = min_bet / max_bet
+
+        features.append(sb_to_min_bet)
+        features.append(bb_to_min_bet)
+        features.append(min_bet_to_pot)
+        features.append(min_bet_to_max_bet)
+
+        # compute the max bet features
+        sb_to_max_bet = small_blind / max_bet
+        bb_to_max_bet = big_blind / max_bet
+        # can't compute max_bet to pot as it might blow up for early hands in deep stacked games
+
+        features.append(sb_to_max_bet)
+        features.append(bb_to_max_bet)
+
         # compute pot features
         # we compute the ratio of the pot to the max stack
         pot_to_max_stack = pot / max_stack
@@ -205,37 +238,67 @@ class Interpreter(nn.Module):
                 # - the ratio to the pot
                 # - the ratio of the small blind to the bet
                 # - the ratio of the big blind to the bet
+                # - the ratio of the bet to the min_bet
+                # - the ratio of the bet to the max_bet
 
                 bet_to_stack = bet / stack
                 bet_to_max_stack = bet / max_stack
                 bet_to_pot = bet / pot
                 sb_to_bet = small_blind / bet
                 bb_to_bet = big_blind / bet
+                if min_bet == 0:
+                    bet_to_min_bet = 0
+                else:
+                    bet_to_min_bet = bet / min_bet
+                bet_to_max_bet = bet / max_bet
 
                 # compute stacks features
                 # - the ratio to the max stack
                 # - the ratio of pot to the stack
                 # - the ratio of the small blind to the stack
                 # - the ratio of the big blind to the stack
+                # - the ratio of the min bet to the stack
+                # - the ratio of the max bet to the stack
                 stack_to_max_stack = stack / max_stack
                 pot_to_stack = pot / stack
                 sb_to_stack = small_blind / stack
                 bb_to_stack = big_blind / stack
+                min_bet_to_stack = min_bet / stack
+                max_bet_to_stack = max_bet / stack
 
-                features.extend([bet_to_stack, bet_to_max_stack, bet_to_pot, sb_to_bet, bb_to_bet, stack_to_max_stack,
-                                 pot_to_stack, sb_to_stack, bb_to_stack])
+                features.extend([bet_to_stack, bet_to_max_stack, bet_to_pot, sb_to_bet, bb_to_bet, bet_to_min_bet,
+                                 bet_to_max_bet, stack_to_max_stack, pot_to_stack, sb_to_stack, bb_to_stack,
+                                 min_bet_to_stack, max_bet_to_stack])
             else:
-                features.extend([0, 0, 0, 0, 0, 0, 0, 0, 0])
-
+                features.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
         # convert boolean features
+        in_hand = torch.tensor(in_hand, dtype=torch.float32).to(self.device)
+        is_button = torch.tensor(is_button, dtype=torch.float32).to(self.device)
+        is_sb = torch.tensor(is_sb, dtype=torch.float32).to(self.device)
+        is_bb = torch.tensor(is_bb, dtype=torch.float32).to(self.device)
+        all_in = torch.tensor(all_in, dtype=torch.float32).to(self.device)
 
         # embed relative position to button
-
-        # append player mask and multiply embeddings by player mask to zero embeddings
+        rel_to_button = torch.tensor(rel_to_button, dtype=torch.long).to(self.device)
+        rel_to_button_embedding = self.rel_to_button_embedding(rel_to_button)
 
         # convert the player mask to a tensor so we can use it to zero out non-existent player's embeddings
         player_mask = torch.tensor(player_mask, dtype=torch.float32).to(self.device)
+        rel_to_button_embedding = rel_to_button_embedding * player_mask.unsqueeze(-1)
+
+        # we finally concat everything to make the final feature vector
+        features = torch.tensor(features, dtype=torch.float32).to(self.device)
+
+        input_features = torch.cat([features, player_card_embeddings, board_card_embeddings, num_player_embeddings,
+                                    in_hand, is_button, is_sb, is_bb, is_bb, all_in, rel_to_button_embedding,
+                                    player_mask], dim=0).to(self.device).contiguous()
+
+        assert input_features.shape[0] == self._expected_input_size(), print(f"Input size {input_features.shape[0]} does"
+                                                                             f" not match expected input size "
+                                                                             f"{self._expected_input_size()}")
+        return input_features
+
 
 # if __name__ == '__main__':
 #     cards = "AcKs"
