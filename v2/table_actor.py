@@ -6,7 +6,7 @@ from action_interpreter import ActionInterpreter, Action
 from state_interpreter import extract_state_snapshot
 from models import load_dummy_model
 import torch
-from alg import PPOInferenceWrapper
+from alg import PPOInferenceWrapper, PPO
 
 
 
@@ -28,8 +28,8 @@ class TableActor:
         self.out_queue = out_queue
         self.device = device
         self.discrete = discrete
-        self.players: list[PPOInferenceWrapper] = [PPOInferenceWrapper(load_dummy_model(device, discrete), discrete)
-                                                   for _ in range(max_table_size)]
+        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete), self.discrete)
+                        for _ in range(max_table_size)]
         self.max_table_size = max_table_size
         self.player_ids = None
         self.params = None
@@ -41,12 +41,12 @@ class TableActor:
         self.current_hand = None
         self.num_games_played = 0
 
-    def reset(self, players_params_list: list[dict[str, torch.Tensor]], player_ids, **table_params):
-        self.players = [PPOInferenceWrapper(load_dummy_model(self.device, self.discrete), self.discrete)
+    def reset(self, players_params_list, player_ids, **table_params):
+        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete), self.discrete)
                         for _ in range(len(player_ids))]
 
         for i, (player, player_params) in enumerate(zip(self.players, players_params_list)):
-            player.load_network_params(player_params)
+            player.load_params(player_params)
             player.to(self.device)
 
         self.player_ids = player_ids

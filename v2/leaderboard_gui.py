@@ -62,3 +62,25 @@ class LeaderboardGUI:
 
         # Schedule next update in 2000ms (2 seconds)
         self.root.after(2000, self.refresh_data)
+
+
+if __name__ == "__main__":
+    print("Connecting to Ray cluster inside Docker...")
+
+    # Connect to the Ray cluster running in Docker over port 10001
+    # Note: ray:// is required for Ray Client connections
+    ray.init(address="ray://localhost:10001", namespace="casino")
+    # We need a way to find the LeaderboardActor that the CasinoManager created.
+    # Ray allows us to fetch actors by their assigned name.
+    try:
+        # We will need to name the actor in the backend first (see Step 3)
+        leaderboard_actor = ray.get_actor("GlobalLeaderboard")
+        print("Successfully connected to the Leaderboard!")
+
+        # Start the GUI
+        gui = LeaderboardGUI(leaderboard_actor)
+
+    except ValueError:
+        print("Could not find the LeaderboardActor. Is the Casino running in Docker?")
+    finally:
+        ray.shutdown()

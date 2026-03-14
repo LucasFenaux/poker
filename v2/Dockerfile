@@ -24,4 +24,5 @@ RUN uv sync --no-dev --no-install-project
 COPY . .
 
 # Run the project using `uv run`, which automatically uses the container's .venv
-CMD ["uv", "run", "main.py"]
+#CMD ["uv", "run", "main.py"]
+CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python main.py

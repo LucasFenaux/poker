@@ -7,7 +7,7 @@ import torch
 from torch.distributions import Categorical, Normal
 import copy
 import pokerkit
-from models import get_value_model
+from models import get_value_model, load_dummy_model
 
 
 class BaseAlgorithm:
@@ -49,37 +49,32 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
                 # "sgd_steps": 80,  # openai implementation
-                "sgd_steps": 5,
-
+                "sgd_steps": 10,
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
                 "value_lr": 1e-5,
                 }
     key = "ppo"
-    def __init__(self, network, lr, device, value_lr, sgd_steps, clip_threshold, target_kl,
+    def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl,
                  discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
         self.clip_threshold = clip_threshold
         self.target_kl = target_kl
         self.value_lr = value_lr
+        network, value_network = self.init_networks(device, discrete)
         self.network = network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
         self.value_network = get_value_model(device)
         self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
         self.discrete = discrete
 
-        network_size = 0
-        for name, param in self.network.named_parameters():
-            network_size += param.numel()
-        print(f"Network size: {network_size}")
-
-        network_size = 0
-        for name, param in self.network.named_parameters():
-            if param.requires_grad:
-                network_size += param.numel()
-        print(f"Trainable network size: {network_size}")
+    @staticmethod
+    def init_networks(device, discrete):
+        network = load_dummy_model(device, discrete)
+        value_network = get_value_model(device)
+        return network, value_network
 
     def set_network(self, network):
         self.network = network
@@ -88,9 +83,16 @@ class PPO(OnPolicyAlgorithm):
     def get_network(self):
         return self.network
 
-    def load_params(self, param_dict):
-        self.network.load_state_dict(param_dict)
+    def load_params(self, param_dicts):
+        network_param_dict, value_param_dict = param_dicts
+        self.network.load_state_dict(network_param_dict)
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+
+        self.value_network.load_state_dict(value_param_dict)
+        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+
+    def get_params(self):
+        return [self.network.state_dict(), self.value_network.state_dict()]
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, *args, **kwargs):
         if isinstance(batch_rewards[0], torch.Tensor):
@@ -199,9 +201,13 @@ class PPO(OnPolicyAlgorithm):
 
 
 class PPOInferenceWrapper:
-    def __init__(self, network, discrete: bool = False):
-        self.network = network
+    def __init__(self, models, discrete: bool = False):
+        self.network = models[0]
         self.discrete = discrete
+
+    def load_params(self, param_dicts):
+        network_param_dict, _ = param_dicts
+        self.network.load_state_dict(network_param_dict)
 
     def load_network_params(self, params):
         self.network.load_state_dict(params)

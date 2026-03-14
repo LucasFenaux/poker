@@ -67,7 +67,7 @@ class LeaderboardActor:
         current_avg_int = int(total_games / max(1, len(self.player_ids)))
 
         # Only trigger the hard drive save if we passed a new integer threshold
-        if current_avg_int > self.last_saved_avg:
+        if current_avg_int // 10 > self.last_saved_avg // 10:  # buffer read/write to every 10 games
             self.save()
             self.last_saved_avg = current_avg_int
 

@@ -8,11 +8,25 @@ import os
 import torch
 
 from global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS
-from models import load_model
+from alg import PPO
 from trainer_actor import TrainerActor
 from table_actor import TableActor
 from leaderboard_actor import LeaderboardActor
-# from leaderboard_gui import LeaderboardGUI
+
+
+class PlayerAI:
+    def __init__(self, models):
+        self.models = models
+
+    def load_params(self, param_dicts):
+        for model, param_dict in zip(self.models, param_dicts):
+            model.load_state_dict(param_dict)
+
+    def get_params(self):
+        params = []
+        for model in self.models:
+            params.append(model.state_dict())
+        return params
 
 
 class DataStorage:
@@ -133,11 +147,18 @@ class CasinoManager:
         os.makedirs(self.save_folder, exist_ok=True)
         self.player_save_folder = os.path.join(save_folder, "players")
         os.makedirs(self.player_save_folder, exist_ok=True)
+        self.log_folder = os.path.join(save_folder, "logs")
+
         self.leaderboard_queue = Queue(maxsize=0)
-        self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
+        # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
+        self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
+            self.leaderboard_queue, self.player_ids, save_folder)
+
         self.leaderboard.start.remote()
         # we spin up the player models
-        self.players = [load_model(player_id, device, discrete) for player_id in self.player_ids]
+        # self.players = [load_model(player_id, device, discrete) for player_id in self.player_ids]
+        self.players = [PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete)) for _ in self.player_ids]
+        self.player_training_counts = [0] * len(self.player_ids)
 
         self.table_max_size = 2
         self.table_min_size = 2
@@ -159,12 +180,9 @@ class CasinoManager:
             table.start.remote()
         # check that we have enough cpus to allocate the number of trainers we want
         self.data_storage = DataStorage(self.player_ids, self.batch_size)
-        # available = ray.available_resources()
-        # free_cpus = available.get('CPU', 0)
-        # assert free_cpus >= NUM_TRAINERS, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
-        #                                         f"requested.")
 
-        self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete)
+        self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
+                                             self.log_folder)
                          for i in range(NUM_TRAINERS)]
         for trainer in self.trainers:
             trainer.start.remote()
@@ -175,15 +193,11 @@ class CasinoManager:
         self.min_bb_ratio = 1
         self.max_bb_ratio = 5
         self.min_allowed_start_bb = 10
-        self.leaderboard_gui = None
         self.stop_event = threading.Event()
         available = ray.available_resources()
         free_cpus = available.get('CPU', 0)
         assert free_cpus >= 0, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
                                                 f"requested.")
-
-    def _start_gui(self):
-        self.leaderboard_gui = LeaderboardGUI(self.leaderboard)
 
     def receive_from_trainer_queue(self):
         queue_empty = False
@@ -196,7 +210,8 @@ class CasinoManager:
 
         if not queue_empty:
             # update that player's model weights
-            self.players[player_id].load_state_dict(new_weights)
+            self.players[player_id].load_params(new_weights)
+            self.player_training_counts[player_id] += 1
 
             # add the player to the table scheduler
             self.table_scheduler.add(player_id, None)
@@ -229,8 +244,8 @@ class CasinoManager:
             return queue_empty, False, None
 
     def save_player(self, player_id):
-        model = self.players[player_id]
-        torch.save(model.state_dict(), os.path.join(self.player_save_folder, f"{player_id}.pt"))
+        player = self.players[player_id]
+        torch.save(player.get_params(), os.path.join(self.player_save_folder, f"{player_id}.pt"))
 
     def start_casino(self):
         print(f"Casino Starting")
@@ -272,7 +287,7 @@ class CasinoManager:
             data = {
                 "type": "players",
                 "player_ids": players,
-                "players_params_list": [self.players[player_id].state_dict() for player_id in players],
+                "players_params_list": [self.players[player_id].get_params() for player_id in players],
                 "table_params": table_params
             }
             self.table_send_queue.put(data)
@@ -297,8 +312,9 @@ class CasinoManager:
                 data = {
                     "type": "player",
                     "player_id": player_id,
-                    "state_dict": self.players[player_id].state_dict(),
-                    "data_batch": self.data_storage.get_batch(player_id)
+                    "state_dicts": self.players[player_id].get_params(),
+                    "data_batch": self.data_storage.get_batch(player_id),
+                    "player_training_count": self.player_training_counts[player_id]
                 }
                 self.trainer_send_queue.put(data)
 
@@ -328,7 +344,7 @@ class CasinoManager:
                 data = {
                     "type": "players",
                     "player_ids": player_ids,
-                    "players_params_list": [self.players[player_id].state_dict() for player_id in player_ids],
+                    "players_params_list": [self.players[player_id].get_params() for player_id in player_ids],
                     "table_params": table_params
                 }
                 self.table_send_queue.put(data)
@@ -339,12 +355,12 @@ class CasinoManager:
         try:
             # we need the casino thread seperate so the gui doesn't block it
             # can't launch the gui inside the thread on Mac
-            casino_thread = threading.Thread(target=self.start_casino, daemon=True)
-            casino_thread.start()
-            while True:
-                time.sleep(1)
+            # casino_thread = threading.Thread(target=self.start_casino, daemon=True)
+            # casino_thread.start()
+            # while True:
+            #     time.sleep(1)
             # self._start_gui()
-            # self.start_casino()
+            self.start_casino()
         except KeyboardInterrupt as e:
             print("Casino terminated")
             raise e
@@ -377,4 +393,5 @@ class CasinoManager:
             # need to tell the leaderboard gui to terminate
             print(f"Closing the leaderboard")
             self.leaderboard.set_done.remote()
-            ray.get(self.leaderboard_gui)
+            # ray.get(self.leaderboard_gui)
+            time.sleep(5)  # giving time for everyone to close

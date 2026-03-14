@@ -32,7 +32,7 @@ def get_save_folder(base_path="results"):
 
 
 if __name__ == '__main__':
-    ray.init(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS, include_dashboard=False)
+    ray.init("auto", namespace="casino")
     device = torch.device("cpu")
     save_folder = get_save_folder()
     manager: CasinoManager = CasinoManager(device, save_folder=save_folder)

@@ -1,0 +1,15 @@
+services:
+  casino_backend:
+    build: .                 # Tells Docker to build the Dockerfile in this directory
+    shm_size: '8gb'          # Replaces --shm-size="4g"
+    ports:
+      - "10001:10001"        # Replaces -p 10001:10001 (Ray Client)
+      - "6379:6379"          # Replaces -p 6379:6379 (Ray GCS)
+      - "8265:8265"          # Replaces -p 8265:8265 (Ray Dashboard)
+    volumes:
+      - "./results:/app/results"
+    environment:
+      - RAY_NUM_CPUS=9999
+    # stdin_open and tty replicate the "-it" flag so you can see the logs
+    stdin_open: true
+    tty: true
