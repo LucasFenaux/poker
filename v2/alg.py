@@ -48,11 +48,13 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 
 class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
-                "sgd_steps": 80,  # openai implementation
+                # "sgd_steps": 80,  # openai implementation
+                "sgd_steps": 5,
+
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
-                "lr": 1e-3,
-                "value_lr": 1e-3,
+                "lr": 1e-4,
+                "value_lr": 1e-5,
                 }
     key = "ppo"
     def __init__(self, network, lr, device, value_lr, sgd_steps, clip_threshold, target_kl,
@@ -91,19 +93,30 @@ class PPO(OnPolicyAlgorithm):
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, *args, **kwargs):
-        batch_rewards = torch.as_tensor(np.array(batch_rewards), device=self.device, dtype=torch.float32)
-        # states = torch.as_tensor(
-        #     np.array(batch_states),
-        #     device=self.device,
-        #     dtype=torch.float32,
-        # )
+        if isinstance(batch_rewards[0], torch.Tensor):
+            batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
+        else:
+            # 1. Cast every element to a standard Python float to strip away Fractions
+            clean_rewards = [float(r) for r in batch_rewards]
+
+            # 2. Now NumPy will happily create a float32 array instead of an object_ array
+            batch_rewards_np = np.array(clean_rewards, dtype=np.float32)
+            # print("rewards", batch_rewards_np.shape)
+
+            # 3. Convert to PyTorch tensor
+            batch_rewards = torch.as_tensor(batch_rewards_np, device=self.device)
+        # print("rew", batch_rewards.shape)
         states = batch_states
 
-        actions = torch.as_tensor(
-            np.array(batch_actions),
-            device=self.device,
-            dtype=torch.long if self.discrete else torch.float32,
-        )
+        if isinstance(batch_actions[0], torch.Tensor):
+            actions = torch.stack(batch_actions).to(self.device).to(torch.long if self.discrete else torch.float32)
+        else:
+            actions = torch.as_tensor(
+                np.array(batch_actions),
+                device=self.device,
+                dtype=torch.long if self.discrete else torch.float32,
+            )
+        # print("actions", actions.shape)
         if batch_rnn_states is not None:
             # we need to reshape the rnn states to be in the proper shape: (LxBxD)
             new_hs = []

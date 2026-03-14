@@ -14,6 +14,7 @@ def get_save_folder(base_path="results"):
     Generates a unique folder name based on the current time and a random ID.
     Example: results/run_20231027_143005_a1b2c3d4
     """
+    base_path = os.path.abspath(base_path)
     # 1. Get current time (YearMonthDay_HourMinuteSecond)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -34,5 +35,5 @@ if __name__ == '__main__':
     ray.init(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS, include_dashboard=False)
     device = torch.device("cpu")
     save_folder = get_save_folder()
-    manager: CasinoManager = CasinoManager(device)
+    manager: CasinoManager = CasinoManager(device, save_folder=save_folder)
     manager.start()

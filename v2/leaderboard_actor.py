@@ -3,9 +3,29 @@ from ray.util.queue import Queue, Empty
 import json
 import os
 import asyncio
+from fractions import Fraction
 
 
-@ray.remote(num_cpus=1)
+class PokerEncoder(json.JSONEncoder):
+    """
+    A custom JSON encoder that converts Fractions (and Decimals)
+    into standard floats or strings so they can be saved to a file.
+    """
+
+    def default(self, obj):
+        # If the object is a Fraction, convert it to a float for saving
+        if isinstance(obj, Fraction):
+            return float(obj)
+
+            # If you prefer absolute precision in your save files,
+        # you can save it as a string instead:
+        # return str(obj)
+
+        # Let the base class handle any standard Python types
+        return super().default(obj)
+
+
+@ray.remote(num_cpus=0)
 class LeaderboardActor:
     def __init__(self, queue: Queue, player_ids, save_folder: str = "./"):
         self.queue = queue
@@ -15,21 +35,21 @@ class LeaderboardActor:
         # New per-player game counter
         self.number_games_played = {player_id: 0 for player_id in player_ids}
         self.is_done = False
-        self.start()
+        self.last_saved_avg = -1
 
     async def start(self):
         while not self.is_done:
             try:
                 # Use block=False and an await so we don't freeze the actor!
                 # This allows the GUI's .remote() calls to be processed.
-                data = self.queue.get(block=False)
-            except Empty:
-                data = None
-                await asyncio.sleep(1)  # Yield control back to Ray's event loop
+                data = await asyncio.wait_for(self.queue.get_async(), timeout=1.0)
 
-            if data is not None:
-                player_id, player_winnings = data
-                self.update(player_id, player_winnings)
+                if data is not None:
+                    player_id, player_winnings = data
+                    self.update(player_id, player_winnings)
+
+            except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!
+                continue
 
         # Use asyncio.sleep instead of time.sleep in an async method
         await asyncio.sleep(10)
@@ -40,6 +60,16 @@ class LeaderboardActor:
     def update(self, player_id, player_winnings):
         self.history_player_winnings[player_id].append(player_winnings)
         self.number_games_played[player_id] += 1
+        # self.save()  # Ensures it saves to the file every time a game finishes
+
+        # Calculate the current average as an integer (e.g., 15.8 becomes 15)
+        total_games = sum(self.number_games_played.values())
+        current_avg_int = int(total_games / max(1, len(self.player_ids)))
+
+        # Only trigger the hard drive save if we passed a new integer threshold
+        if current_avg_int > self.last_saved_avg:
+            self.save()
+            self.last_saved_avg = current_avg_int
 
     def generate_leaderboard_data(self):
         stats = []
@@ -68,13 +98,15 @@ class LeaderboardActor:
 
     def get_leaderboard_stats(self):
         all_time, recent_top = self.generate_leaderboard_data()
-        # Calculate the total games played across everyone for the GUI header
+
+        # Calculate the AVERAGE games played
         total_games = sum(self.number_games_played.values())
+        avg_games = total_games / max(1, len(self.player_ids))
 
         return {
             "all_time": all_time,
             "recent": recent_top,
-            "total_games": total_games,  # Replaces the old game_counter
+            "avg_games": avg_games,  # Replaced total_games
             "is_done": self.is_done
         }
 
@@ -82,15 +114,18 @@ class LeaderboardActor:
         # 1. Save the histogram
         os.makedirs(self.save_folder, exist_ok=True)
         with open(os.path.join(self.save_folder, "winning_histogram.json"), "w") as f:
-            json.dump(self.history_player_winnings, f, indent=4)
+            json.dump(self.history_player_winnings, f, indent=4, cls=PokerEncoder)
 
         # 2. Generate and Save Table
         all_time, recent_top = self.generate_leaderboard_data()
+
+        # Calculate the AVERAGE games played
         total_games = sum(self.number_games_played.values())
+        avg_games = total_games / max(1, len(self.player_ids))
 
         table_path = os.path.join(self.save_folder, "leaderboard.txt")
         with open(table_path, "w") as f:
-            f.write(f"=== ALL-TIME LEADERBOARD (Total Games: {total_games}) ===\n")
+            f.write(f"=== ALL-TIME LEADERBOARD (Avg Games/Player: {avg_games:.1f}) ===\n")
             f.write(f"{'Rank':<5} | {'Player ID':<10} | {'Games':<6} | {'Total Winnings':<15}\n")
             f.write("-" * 45 + "\n")
             for i, p in enumerate(all_time, 1):
@@ -102,4 +137,4 @@ class LeaderboardActor:
             for i, p in enumerate(recent_top, 1):
                 f.write(f"{i:<5} | {p['id']:<10} | {p['game_count']:<6} | {p['recent_avg']:<15.2f}\n")
 
-        print(f"Total Games: {total_games} - Leaderboard saved to {table_path}")
+        print(f"Avg Games: {avg_games:.1f} - Leaderboard saved to {table_path}")

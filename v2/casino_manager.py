@@ -1,5 +1,7 @@
 import random
 import threading
+import time
+
 import ray
 from ray.util.queue import Queue, Empty
 import os
@@ -10,7 +12,7 @@ from models import load_model
 from trainer_actor import TrainerActor
 from table_actor import TableActor
 from leaderboard_actor import LeaderboardActor
-from leaderboard_gui import LeaderboardGUI
+# from leaderboard_gui import LeaderboardGUI
 
 
 class DataStorage:
@@ -62,9 +64,12 @@ class TableScheduler:
         self.player_ids = player_ids
         self.table_max_size = table_max_size
         self.table_min_size = table_min_size
-        self.waiting_rooms = [[] for _ in range(table_max_size)]
-        self.next_table_size = [random.randint(table_min_size, table_max_size)] * table_max_size
+        # self.waiting_rooms = [[] for _ in range(table_max_size)]
+        self.waiting_rooms = [[] for _ in range(NUM_PLAYERS//table_min_size + int(NUM_PLAYERS%table_min_size > 0))]
+        print(f"Created {len(self.waiting_rooms)} waiting rooms")
+        self.next_table_size = [random.randint(table_min_size, table_max_size)] * len(self.waiting_rooms)
         self.last_table_played_at: dict[int, int] = {player_id: None for player_id in player_ids}
+        # TODO: implement a new way to do the waiting room so I don't have only table max size ** 2 players playing
 
     def all_waiting_rooms_are_full(self):
         for waiting_room, next_table_size in zip(self.waiting_rooms, self.next_table_size):
@@ -83,7 +88,7 @@ class TableScheduler:
 
         table_id = self.last_table_played_at[player_id]
         # find which waiting room to put them in
-
+        added_to_a_table = False
         for i, waiting_room in enumerate(self.waiting_rooms):
             found_same_table_player = False
             for other_player_id in waiting_room:
@@ -93,6 +98,16 @@ class TableScheduler:
             if not found_same_table_player and len(waiting_room) < self.next_table_size[i]:
                 # we can add them to the waiting room
                 waiting_room.append(player_id)
+                added_to_a_table = True
+                break
+
+        if not added_to_a_table:
+            # we just add them to a non-full table for now
+            # TODO: do something better than that. Might require a scheduler overhaul
+            for i, waiting_room in enumerate(self.waiting_rooms):
+                if len(waiting_room) < self.next_table_size[i]:
+                    waiting_room.append(player_id)
+                    break
         return True
 
     def get_full_waiting_room(self):
@@ -120,12 +135,13 @@ class CasinoManager:
         os.makedirs(self.player_save_folder, exist_ok=True)
         self.leaderboard_queue = Queue(maxsize=0)
         self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
-
+        self.leaderboard.start.remote()
         # we spin up the player models
         self.players = [load_model(player_id, device, discrete) for player_id in self.player_ids]
 
         self.table_max_size = 2
         self.table_min_size = 2
+        self.batch_size = 5000
         self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
         self.table_send_queue = Queue(maxsize=0)
@@ -139,16 +155,19 @@ class CasinoManager:
               f"{self.table_max_size}...")
         self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                          self.table_max_size, discrete) for table_id in range(NUM_TABLES)]   # we spin up the tables at the beginning to avoid the churn
-
+        for table in self.tables:
+            table.start.remote()
         # check that we have enough cpus to allocate the number of trainers we want
-        available = ray.available_resources()
-        free_cpus = available.get('CPU', 0)
+        self.data_storage = DataStorage(self.player_ids, self.batch_size)
+        # available = ray.available_resources()
+        # free_cpus = available.get('CPU', 0)
         # assert free_cpus >= NUM_TRAINERS, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
         #                                         f"requested.")
 
-        self.trainers = [TrainerActor.remote(self.trainer_send_queue, self.trainer_receive_queue, device, discrete)
-                         for _ in range(NUM_TRAINERS)]
-
+        self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete)
+                         for i in range(NUM_TRAINERS)]
+        for trainer in self.trainers:
+            trainer.start.remote()
         self.min_stack = 50
         self.max_stack = 1000
         self.min_small_blind = 1
@@ -158,6 +177,10 @@ class CasinoManager:
         self.min_allowed_start_bb = 10
         self.leaderboard_gui = None
         self.stop_event = threading.Event()
+        available = ray.available_resources()
+        free_cpus = available.get('CPU', 0)
+        assert free_cpus >= 0, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
+                                                f"requested.")
 
     def _start_gui(self):
         self.leaderboard_gui = LeaderboardGUI(self.leaderboard)
@@ -247,35 +270,42 @@ class CasinoManager:
 
             # gather the player's parameters and send it all
             data = {
+                "type": "players",
                 "player_ids": players,
                 "players_params_list": [self.players[player_id].state_dict() for player_id in players],
                 "table_params": table_params
             }
             self.table_send_queue.put(data)
-        i = 0
-        while not self.stop_event.is_set() or i > 1_000_000:   # keep running the casino forever
+        # i = 0
+        while (not self.stop_event.is_set()):   # keep running the casino forever
+            # if i % 100 == 0:
+            #     self.leaderboard.save.remote()
             # casino main loop
-
             # Step 1: Receive from our trainer queue
-            queue_empty, player_id = self.receive_from_trainer_queue()
+            trainer_queue_empty, player_id = self.receive_from_trainer_queue()
 
-            if not queue_empty:
+            if not trainer_queue_empty:
                 assert player_id is not None
                 # save the player's parameter whom we updated
                 self.save_player(player_id)
 
             # Step 2: Receive from our table queue
-            queue_empty, can_train, player_id = self.receive_from_table_queue()
+            table_queue_empty, can_train, player_id = self.receive_from_table_queue()
 
             # Step 3: Send the player we received to the trainer if it has enough data to train
-            if not queue_empty and can_train:
+            if not table_queue_empty and can_train:
                 data = {
-                    "type": "trainer",
+                    "type": "player",
                     "player_id": player_id,
                     "state_dict": self.players[player_id].state_dict(),
                     "data_batch": self.data_storage.get_batch(player_id)
                 }
                 self.trainer_send_queue.put(data)
+
+            # if trainer_queue_empty and table_queue_empty:
+            #     time.sleep(0.01)
+            # else:
+            #     time.sleep(0.02)
 
             # Step 4: Check if any of the waiting rooms are full, if so, put them in the table queue
             player_ids, table_size = self.table_scheduler.get_full_waiting_room()
@@ -290,18 +320,19 @@ class CasinoManager:
                 table_params = {
                     "raw_blinds_or_straddles": (small_blind, big_blind),
                     "min_bet": big_blind,
-                    "raw_starting_stacks ": starting_stacks,
+                    "raw_starting_stacks": starting_stacks,
                     "player_count": table_size
                 }
 
                 # gather the player's parameters and send it all
                 data = {
+                    "type": "players",
                     "player_ids": player_ids,
                     "players_params_list": [self.players[player_id].state_dict() for player_id in player_ids],
                     "table_params": table_params
                 }
                 self.table_send_queue.put(data)
-                i += 1
+            # i += 1
         print("Casino cleaning up and shutting down...")
 
     def start(self):
@@ -310,8 +341,9 @@ class CasinoManager:
             # can't launch the gui inside the thread on Mac
             casino_thread = threading.Thread(target=self.start_casino, daemon=True)
             casino_thread.start()
-
-            self._start_gui()
+            while True:
+                time.sleep(1)
+            # self._start_gui()
             # self.start_casino()
         except KeyboardInterrupt as e:
             print("Casino terminated")

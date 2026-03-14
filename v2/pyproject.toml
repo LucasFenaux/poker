@@ -1,0 +1,14 @@
+[project]
+name = "poker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.3",
+    "pip>=26.0.1",
+    "pokerkit>=0.7.3",
+    "ray>=2.54.0",
+    "setuptools>=82.0.0",
+    "torch>=2.10.0",
+]

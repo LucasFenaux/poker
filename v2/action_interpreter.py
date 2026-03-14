@@ -1,5 +1,7 @@
 from enum import Enum
 import torch.nn as nn
+from fractions import Fraction
+
 
 class Action(Enum):
     CHECK_OR_FOLD = 0
@@ -19,6 +21,9 @@ class Action(Enum):
         else:
             return cls.ALL_IN
 
+def to_exact_fraction(amount: float) -> Fraction:
+    return Fraction(str(amount))
+
 
 class ActionInterpreter(nn.Module):
 
@@ -36,7 +41,7 @@ class ActionInterpreter(nn.Module):
                 # we assume it's a min_bet
                 return min_bet
 
-            return bet * (max_bet - min_bet) + min_bet
+            return to_exact_fraction(bet * (max_bet - min_bet) + min_bet)
 
         # we squash both the action and the bet sizing and use the bet sizing as the slider between min and max bet
 

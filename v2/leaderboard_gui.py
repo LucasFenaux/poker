@@ -49,13 +49,13 @@ class LeaderboardGUI:
                     f"{p['recent_avg']:.2f}"
                 ))
 
-            # Update the label using the overall total_games
+            # Update the label using the overall avg_games
             if data.get('is_done'):
-                self.label.config(text=f"Final Standings (Total Games: {data['total_games']}) - FINISHED")
+                self.label.config(text=f"Final Standings (Avg Games: {data['avg_games']:.1f}) - FINISHED")
                 self.root.after(1000, self.root.destroy)
                 return
             else:
-                self.label.config(text=f"Live Standings (Total Games: {data['total_games']})")
+                self.label.config(text=f"Live Standings (Avg Games: {data['avg_games']:.1f})")
 
         except Exception as e:
             print(f"Waiting for actor... {e}")
