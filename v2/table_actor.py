@@ -1,25 +1,16 @@
-from global_settings import TABLE_CPU_LIMIT, NUM_CPUS, NUM_PLAYERS
-import asyncio # Make sure this is imported at the top!
 import copy
 import ray
+from ray.util.queue import Queue, Empty
 from pokerkit import NoLimitTexasHoldem, Automation
-from player_actor import PlayerActor
 from action_interpreter import ActionInterpreter, Action
 from state_interpreter import extract_state_snapshot
+from models import load_dummy_model
 import torch
-import time
-from models import load_model
-from alg import PPO, OnPolicyAlgorithm
+from alg import PPOInferenceWrapper
 
-table_env_vars = {
-    "OMP_NUM_THREADS": str(TABLE_CPU_LIMIT),
-    "MKL_NUM_THREADS": str(TABLE_CPU_LIMIT),
-    "OPENBLAS_NUM_THREADS": str(TABLE_CPU_LIMIT),
-    "VECLIB_MAXIMUM_THREADS": str(TABLE_CPU_LIMIT),  # Added this
-    "NUMEXPR_NUM_THREADS": str(TABLE_CPU_LIMIT)      # Added this
-}
 
-@ray.remote(num_cpus=NUM_CPUS/NUM_PLAYERS,  runtime_env={"env_vars": table_env_vars})
+
+@ray.remote(num_cpus=1)
 # @ray.remote(num_cpus=0.1)
 class TableActor:
     default_params = {
@@ -31,69 +22,76 @@ class TableActor:
         "player_count": 2
     }
 
-    def __init__(self, device):
-        # os.nice(15)
-        torch.set_num_threads(TABLE_CPU_LIMIT)
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool):
+        self.table_id = table_id
+        self.in_queue = in_queue
+        self.out_queue = out_queue
         self.device = device
-        self.players: list[PlayerActor] = None
+        self.discrete = discrete
+        self.players: list[PPOInferenceWrapper] = [PPOInferenceWrapper(load_dummy_model(device, discrete), discrete)
+                                                   for _ in range(max_table_size)]
+        self.max_table_size = max_table_size
         self.player_ids = None
         self.params = None
         self.action_interpreter: ActionInterpreter = ActionInterpreter()
-        self.player_winnings: dict[int: float] = None
+        self.player_winnings: dict[int, float] = None
         self.stacks = None
         self.starting_stacks = None
         self.hand_info = None
-        self.local_algs = None
+        self.current_hand = None
+        self.start()
 
-    async def reset(self, players: list[PlayerActor], **params):
-        self.players: list[PlayerActor] = players
-        self.player_ids = [await player.get_id.remote() for player in self.players]
+    def reset(self, players_params_list: list[dict[str, torch.Tensor]], player_ids, **table_params):
+        self.players = [PPOInferenceWrapper(load_dummy_model(self.device, self.discrete), self.discrete)
+                        for _ in range(len(player_ids))]
 
-        self.local_algs = []  # We will store the local brains here
+        for i, (player, player_params) in enumerate(zip(self.players, players_params_list)):
+            player.load_network_params(player_params)
+            player.to(self.device)
 
-        # 2. Download the weights and build the local models
-        for player, p_id in zip(self.players, self.player_ids):
-            weights = await player.get_weights.remote()
+        self.player_ids = player_ids
 
-            # Build a local CPU copy of the model
-            local_model = load_model(p_id, self.device, deterministic=False)
-            local_model.load_state_dict(weights)
-
-            # Wrap it in the PPO algorithm logic so it acts exactly like the player
-            local_alg = PPO(local_model, device=self.device, discrete=False, **PPO.default_hyperparameters)
-            self.local_algs.append(local_alg)
-
-        self.params = params
+        self.params = table_params
         for param in self.default_params:
             if param not in self.params:
                 self.params[param] = self.default_params[param]
 
         assert len(self.players) == self.params["player_count"]
 
-        ids = [await p.get_id.remote() for p in players]
-        self.player_winnings: dict[int: float] = {player_id: 0 for player_id in ids}
+        self.player_winnings: dict[int: float] = {player_id: 0 for player_id in self.player_ids}
         starting_stacks = self.params.pop("raw_starting_stacks")
         if isinstance(starting_stacks, int):
             self.stacks = [starting_stacks] * len(self.players)
             self.starting_stacks = [starting_stacks] * len(self.players)  # will use it to compute game winnings
-
         else:
             self.stacks = starting_stacks
             self.starting_stacks = copy.deepcopy(starting_stacks)  # will use it to compute game winnings
 
         self.hand_info = {}
+        self.current_hand = {}
         self._reset_hand_info()
             
     def _reset_hand_info(self):
         self.hand_info = {}
-        for i in range(len(self.players)):
-            self.hand_info[i] = {
+        for player_id in self.player_ids:
+            self.hand_info[player_id] = {
+                "states": [],
+                "current_actors": [],
+                "actions": [],
+                "rewards": []
+            }
+        self._reset_current_hand()
+
+    def _reset_current_hand(self):
+        self.current_hand = {}
+        for player_id in self.player_ids:
+            self.current_hand[player_id] = {
                 "states": [],
                 "current_actors": [],
                 "actions": [],
             }
 
-    async def _play_round(self):
+    def _play_round(self):
         state = NoLimitTexasHoldem.create_state(
             (
                 Automation.ANTE_POSTING,
@@ -117,22 +115,11 @@ class TableActor:
             # find the current player and gather the necessary information
             current_actor = state.actor_index
             player = self.players[current_actor]
+            player_id = self.player_ids[current_actor]
             snapshot = extract_state_snapshot(state, current_actor)
             try:
-                # player_action = ray.get(player.get_action.remote(snapshot, current_actor))
-                # start_rpc = time.perf_counter()
-                # player_action, math_time = await player.get_action.remote(snapshot, current_actor)
-                # 3. Stop the timer
-                # round_trip_time = time.perf_counter() - start_rpc
-
-                # 4. Calculate the wasted network time
-                # ray_overhead = round_trip_time - math_time
-
-                # 5. Print the hard data to the console!
-                # print(
-                #     f"Total Wait: {round_trip_time:.5f}s | Model Math: {math_time:.5f}s | Ray Overhead: {ray_overhead:.5f}s")
-                with torch.no_grad():
-                    player_action_tensor = self.local_algs[current_actor].get_action((snapshot, current_actor))
+               with torch.no_grad():
+                    player_action_tensor = player.get_action((snapshot, current_actor))
                     player_action = player_action_tensor.detach().cpu()
 
             except Exception as e:
@@ -141,11 +128,9 @@ class TableActor:
             # time.sleep(0.01)
 
             # we log the state and action for player training
-            # self.hand_info[current_actor]["states"].append(copy.deepcopy(state))
-            # snapshot = extract_state_snapshot(state, current_actor)
-            self.hand_info[current_actor]["states"].append(snapshot)
-            self.hand_info[current_actor]["current_actors"].append(current_actor)
-            self.hand_info[current_actor]["actions"].append(player_action)
+            self.current_hand[player_id]["states"].append(snapshot)
+            self.current_hand[player_id]["current_actors"].append(current_actor)
+            self.current_hand[player_id]["actions"].append(player_action)
 
             # we convert the action into something we can use
             min_bet = state.min_completion_betting_or_raising_to_amount
@@ -198,16 +183,23 @@ class TableActor:
         # compute rewards and update player stacks
         final_stacks = copy.deepcopy(state.stacks)
         self.stacks = final_stacks
-        reward = [(final - start)/self.params["raw_blinds_or_straddles"][-1] for final, start in
+        reward_list = [(final - start)/self.params["raw_blinds_or_straddles"][-1] for final, start in
                   zip(final_stacks, starting_stacks)]
 
         busted_out = []
-        for i, player in enumerate(self.players):
+        for i, player_id in enumerate(self.player_ids):
             # send the players their hand info for training
-            player.store_hand.remote(states=self.hand_info[i]["states"],
-                                     current_actors=self.hand_info[i]["current_actors"],
-                                     actions=self.hand_info[i]["actions"],
-                                     reward=reward[i])
+            reward = reward_list[i]
+            rewards = [reward] * len(self.current_hand[player_id]["states"])
+
+            assert len(rewards) == len(self.current_hand[player_id]["current_actors"])
+            assert len(rewards) == len(self.current_hand[player_id]["actions"])
+
+            self.hand_info[player_id]["states"].extend(self.current_hand[player_id]["states"])
+            self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
+            self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
+            self.hand_info[player_id]["rewards"].extend(rewards)
+
             # check which players busted out
             final_stack = final_stacks[i]
             if final_stack <= self.params["min_bet"]:
@@ -223,7 +215,6 @@ class TableActor:
 
             self.players.pop(busted_player_idx)
             self.stacks.pop(busted_player_idx)
-            self.hand_info.pop(busted_player_idx)
             self.player_ids.pop(busted_player_idx)
 
         if len(self.players) < 2:
@@ -231,38 +222,50 @@ class TableActor:
 
         return False
 
-    async def play_game(self):
+    def play_game(self):
         try:
             done = False
             while not done:
-                done = await self._play_round()
+                done = self._play_round()
 
-                # 1. CRITICAL FIX: Wait for all players to finish their update logic concurrently
-                update_statuses = await asyncio.gather(*[player.update.remote() for player in self.players])
-
-                # 2. Check if any player successfully trained
-                for i, (player, brain_changed) in enumerate(zip(self.players, update_statuses)):
-                    if brain_changed:
-                        # 3. Download the fresh weights to keep the local model strictly on-policy!
-                        new_weights = await player.get_weights.remote()
-                        self.local_algs[i].network.load_state_dict(new_weights)
-
-                # for player in self.players:
-                #     player.update.remote()
-
-                self._reset_hand_info()
-                # time.sleep(0.01)
+                self._reset_current_hand()
             # need to save th remaining player's winnings
             # update player winnings
             for i, player_id in enumerate(self.player_ids):
                 self.player_winnings[player_id] += self.stacks[i] - self.starting_stacks[i]  # we look at the game starting stacks, not the hand starting stacks
 
-            # the players save themselves at the end of the game. We could save at each update
-            # but it might be too disk intensive and unnecessary
-            for player in self.players:
-                player.save.remote()
+            # put the winnings and hand data in the queue
+            batch = []
+            for player_id, hand_info in self.hand_info.items():
+                player_winnings = self.player_winnings[player_id]
+                batch.append({
+                    "table_id": self.table_id,
+                    "player_id": player_id,
+                    "hand_info": hand_info,
+                    "player_winnings": player_winnings
+                })
+            self.out_queue.put_nowait_batch(batch)
 
-            return self.player_winnings
+            return True
         except Exception as e:
             print(f"Encountered exception: {e}")
             raise e
+
+    def start(self):
+        while True:
+            try:
+                data = self.in_queue.get(block=True, timeout=1)
+            except Empty:
+                data = None
+
+            if data is not None:
+                if data["type"] == "message":
+                    terminate = data.get("terminate", True)  # by default we assume that we need to terminate in case of a malformed message
+                    if terminate:
+                        return True
+
+                # otherwise, we are good to go
+                assert data["type"] == "players"
+                self.reset(data["players_params_list"], data["player_ids"], **data["table_params"])
+
+                self.play_game()

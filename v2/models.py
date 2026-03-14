@@ -95,3 +95,9 @@ def load_model(player_id, device, deterministic=False) -> PokerModel:
     interpreter = StateInterpreter(device).to(device)
     model  = PokerModel(interpreter, deterministic).to(device)
     return model
+
+
+def load_dummy_model(device, deterministic=False) -> PokerModel:
+    interpreter = StateInterpreter(device).to(device)
+    model  = PokerModel(interpreter, deterministic).to(device)
+    return model

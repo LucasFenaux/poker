@@ -20,9 +20,12 @@ class CasinoManager:
         self.player_save_folder = os.path.join(save_folder, "players")
         os.makedirs(self.player_save_folder, exist_ok=True)
         self.players = [PlayerActor.remote(i, self.player_save_folder, device, discrete) for i in self.player_ids]
-        self.tables = []
         self.table_max_size = 2
         self.table_min_size = 2
+
+        max_tables_needed = len(self.player_ids) // self.table_min_size
+        print(f"Opening casino with {max_tables_needed} permanent tables...")
+        self.tables = [TableActor.remote(device) for _ in range(max_tables_needed)]   # we spin up the tables at the beginning to avoid the churn
         self.min_stack = 50
         self.max_stack = 1000
         self.min_small_blind = 1
@@ -38,10 +41,13 @@ class CasinoManager:
 
     def start_casino(self):
         for i in range(NUM_GAMES):
-            self.tables = []
+            active_game_refs = []
+            available_tables = list(self.tables)
+
             players_left = [player for player in self.players]
             num_players_left = len(players_left)
             while num_players_left > 0:
+                table = available_tables.pop()
                 # first we select the tabe size
                 # print(num_players_left)
                 if num_players_left <= self.table_max_size:
@@ -64,13 +70,16 @@ class CasinoManager:
                 starting_stacks = random.randint(max(self.min_stack, big_blind*10) , max(self.max_stack, big_blind*10))
 
                 # spin up the game
-                table = TableActor.remote(players, raw_blinds_or_straddles=(small_blind, big_blind), min_bet=big_blind,
-                                   raw_starting_stacks=starting_stacks, player_count=table_size)
+                ray.get(table.reset.remote(players, raw_blinds_or_straddles=(small_blind, big_blind), min_bet=big_blind,
+                                   raw_starting_stacks=starting_stacks, player_count=table_size))
+
                 game_ref = table.play_game.remote()
-                self.tables.append((table, game_ref))
+                active_game_refs.append(game_ref)
+
             print(f"Game {i+1} - Booted up {len(self.tables)} tables")
-            for table, game_ref in self.tables:
-                player_winnings = ray.get(game_ref)
+
+            round_results = ray.get(active_game_refs)
+            for player_winnings in round_results:
                 self.leaderboard.update.remote(player_winnings)
 
             self.leaderboard.update_game_counter.remote()
@@ -86,5 +95,5 @@ class CasinoManager:
         casino_thread.start()
 
         self._start_gui()
-
+        # self.start_casino()
 

@@ -1,15 +1,29 @@
+from global_settings import NUM_PLAYERS, NUM_GPUS, PLAYER_CPU_LIMIT, NUM_CPUS
+
 import ray
-import torch
-import pokerkit
 import os
-from global_settings import NUM_PLAYERS, NUM_GPUS, NUM_CPUS
+import torch
+import time
+
 from models import load_model
 from alg import PPO, OnPolicyAlgorithm
 
+actor_env_vars = {
+    "OMP_NUM_THREADS": str(PLAYER_CPU_LIMIT),
+    "MKL_NUM_THREADS": str(PLAYER_CPU_LIMIT),
+    "OPENBLAS_NUM_THREADS": str(PLAYER_CPU_LIMIT),
+    "VECLIB_MAXIMUM_THREADS": str(PLAYER_CPU_LIMIT),  # Added this
+    "NUMEXPR_NUM_THREADS": str(PLAYER_CPU_LIMIT)      # Added this
+}
 
-@ray.remote(num_cpus=0.5*(NUM_CPUS/NUM_PLAYERS), num_gpus=0.5*(float(NUM_GPUS/NUM_PLAYERS)))
+@ray.remote(num_cpus=0.5*NUM_CPUS/NUM_PLAYERS, num_gpus=NUM_GPUS/NUM_PLAYERS, runtime_env={"env_vars": actor_env_vars})
+# @ray.remote(num_cpus=PLAYER_CPU_LIMIT, num_gpus=NUM_GPUS/NUM_PLAYERS)
 class PlayerActor:
-    def __init__(self, player_id: int, save_folder: str, device: torch.device, deterministic: bool = False):
+    def __init__(self, player_id: int, save_folder: str, device, deterministic: bool = False):
+        # os.nice(15)
+        # Lock PyTorch's Python threads
+        # torch.set_num_threads(PLAYER_CPU_LIMIT)
+        self.device = device
         self.player_id = player_id
         self.deterministic = deterministic
         self.save_folder = save_folder
@@ -23,11 +37,21 @@ class PlayerActor:
         self.gamma = 0.99
         self.batch_size = 5000
 
+        print(f"[Player {self.player_id}] OS OMP limit: {os.environ.get('OMP_NUM_THREADS')}")
+        print(f"[Player {self.player_id}] PyTorch thread count: {torch.get_num_threads()}")
+
+    def get_weights(self):
+        # Move weights to CPU before sending over Ray
+        return {k: v.cpu() for k, v in self.model.state_dict().items()}
+
     def get_id(self):
         return self.player_id
 
-    def get_action(self, state: pokerkit.State, current_actor: int):
-        return self.alg.get_action((state, current_actor), rnn_state=None)
+    def get_action(self, state, current_actor: int):
+        start_math = time.perf_counter()
+        action= self.alg.get_action((state, current_actor), rnn_state=None)
+        math_time = time.perf_counter() - start_math
+        return action, math_time
 
     def store_hand(self, states, current_actors, actions, reward):
         assert len(states) == len(actions) == len(current_actors)
@@ -50,9 +74,12 @@ class PlayerActor:
                 # we need batch_states, batch_rewards, and batch_actions
                 self.alg.update((self.batch_states, self.batch_current_actors), self.batch_rewards, self.batch_actions)
                 self.batch_states, self.batch_current_actors, self.batch_rewards, self.batch_actions = [], [], [], []
-            # else:
-            #     if self.player_id == 0:
-            #         print(f"Player 0 current batch len is {len(self.batch_states)}")
+                return True
+            else:
+                if self.player_id == 0:
+                    print(f"Player 0 current batch len is {len(self.batch_states)}")
+
+        return False
 
     def save(self):
         torch.save(self.model.state_dict(), os.path.join(self.save_folder, f"{self.player_id}.pt"))

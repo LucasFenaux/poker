@@ -1,4 +1,4 @@
-from global_settings import NUM_CPUS, NUM_GPUS, PLAYER_CPU_LIMIT
+from global_settings import NUM_CPUS, NUM_GPUS
 
 import ray
 import torch
@@ -31,7 +31,6 @@ def get_save_folder(base_path="results"):
 
 
 if __name__ == '__main__':
-    print(f"{PLAYER_CPU_LIMIT} cpu thread per player actor")
     ray.init(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS, include_dashboard=False)
     device = torch.device("cpu")
     save_folder = get_save_folder()
