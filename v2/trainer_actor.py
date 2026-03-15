@@ -1,16 +1,16 @@
 import ray
 from ray.util.queue import Queue, Empty
-import time
+import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
 
-from models import load_dummy_model
 from alg import PPO
 
 
 @ray.remote(num_cpus=1)
 class TrainerActor:
-    def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str):
+    def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
+                 player_save_folder: str) -> None:
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue
@@ -19,8 +19,12 @@ class TrainerActor:
         self.discrete = discrete
         self.num_training_ran = 0
         self.log_folder = log_folder
+        self.player_save_folder = player_save_folder
         log_path = os.path.join(self.log_folder, "tensorboard_logs")
         self.writer = SummaryWriter(log_dir=log_path)
+
+    def save_player(self, player_id, params):
+        torch.save(params, os.path.join(self.player_save_folder, f"{player_id}.pt"))
 
     def run(self, player_id, player_state_dicts, data_batch, player_training_count: int):
         try:
@@ -47,10 +51,12 @@ class TrainerActor:
             new_weights = alg.get_params()
             self.out_queue.put((player_id, new_weights))
             self.num_training_ran += 1
+            return new_weights
         except Exception as e:
             print(f"Exception: {e} encountered in Trainer {self.trainer_id} training player: {player_id}")
             # abort training and send back the original weights
             self.out_queue.put((player_id, player_state_dicts))
+            return None
 
     def start(self):
         while True:
@@ -66,6 +72,11 @@ class TrainerActor:
 
             assert data["type"] == "player"
 
-            self.run(data["player_id"], data["state_dicts"], data["data_batch"], data["player_training_count"])
+            player_id = data["player_id"]
+            player = ray.get(data["player_ref"])
+            batch = ray.get(data["batch_ref"])
+            player_training_count = data["player_training_count"]
 
-
+            params = self.run(player_id, player.get_params(), batch, player_training_count)
+            if params is not None:
+                self.save_player(player_id, params)

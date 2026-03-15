@@ -54,9 +54,10 @@ class PPO(OnPolicyAlgorithm):
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
                 "value_lr": 1e-5,
+                "reward_normalization_scaler": 100
                 }
     key = "ppo"
-    def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl,
+    def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
                  discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
@@ -65,10 +66,11 @@ class PPO(OnPolicyAlgorithm):
         self.value_lr = value_lr
         network, value_network = self.init_networks(device, discrete)
         self.network = network
+        self.value_network = value_network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.value_network = get_value_model(device)
         self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
         self.discrete = discrete
+        self.reward_normalization_scaler = reward_normalization_scaler
 
     @staticmethod
     def init_networks(device, discrete):
@@ -139,6 +141,7 @@ class PPO(OnPolicyAlgorithm):
         count = 0
         avg_v_loss = 0
 
+        batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
         # batch_rewards = normalize_rewards(batch_rewards, self.env_name)
 
         # we then do multiple steps of SGD for the policy update
@@ -147,8 +150,14 @@ class PPO(OnPolicyAlgorithm):
             self.value_optimizer.zero_grad()
             value_function = self.value_network(*states).squeeze()
             # value_function = normalize_rewards(value_function, self.env_name)
+            # we scale down the predicted reward
+            value_function = value_function
+
             # we normalize after here because we need to preserve the sign of the advantage so we cannot mean/std batch normalize it as that might shift it
             advantages = batch_rewards - value_function.clone().detach()
+
+            # mean/std normalize the advantages
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             # update the value network
             value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)

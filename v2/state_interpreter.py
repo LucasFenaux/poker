@@ -6,7 +6,6 @@ It is trainable and should be part of the model.
 import torch
 import torch.nn as nn
 import pokerkit
-import copy
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -31,8 +30,7 @@ def extract_state_snapshot(state, current_actor) -> StateSnapshot:
     cards = state.hole_cards[current_actor]
     cards = "".join([repr(card) for card in cards])
     if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
-        board_cards = copy.deepcopy(
-            state.board_cards[0])  # we will never encounter multiple boards when making decisions
+        board_cards = state.board_cards[0][:]  # we will never encounter multiple boards when making decisions
     elif len(state.board_cards) > 0:
         raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
     else:
@@ -155,7 +153,7 @@ class StateInterpreter(nn.Module):
             cards = state.hole_cards[current_actor]
             cards = "".join([repr(card) for card in cards])
             if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
-                board_cards = copy.deepcopy(state.board_cards[0])  # we will never encounter multiple boards when making decisions
+                board_cards = state.board_cards[0][:]  # we will never encounter multiple boards when making decisions
             elif len(state.board_cards) > 0:
                 raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
             else:
@@ -176,36 +174,6 @@ class StateInterpreter(nn.Module):
 
             min_bet = state.min_completion_betting_or_raising_to_amount
             max_bet = state.max_completion_betting_or_raising_to_amount
-
-        # that player's cards
-        # bets = copy.deepcopy(state.bets)
-        # stacks = copy.deepcopy(state.stacks)
-        # in_hand = copy.deepcopy(state.statuses)
-        # cards = copy.deepcopy(state.hole_cards[current_actor])
-        # pots = copy.deepcopy(tuple(state.pots) if state.pots is not None else [])
-        #
-        # cards = "".join([repr(card) for card in cards])
-
-        # the current board (+ any unknown cards)
-        # if len(state.board_cards) > 0 and isinstance(state.board_cards[0], list):
-        #     board_cards = copy.deepcopy(state.board_cards[0])  # we will never encounter multiple boards when making decisions
-        # elif len(state.board_cards) > 0:
-        #     raise TypeError(f"Board is single depth all of the time: {state.board_cards}")
-        # else:
-        #     board_cards = []
-        # to_add = 5 - len(board_cards)
-        #
-        # board_cards = "".join([repr(card) for card in board_cards] + ["??"] * to_add)
-
-        # num_players = state.player_count
-
-        # blind info
-        # sb, bb = state.blinds_or_straddles
-
-        # pot info
-        # pot = sum(list(state.pot_amounts))  # for now ignore side-pots TODO: handle side-pots
-        # turns out pokerkit pot only updates at the end of bet collection
-        # pot = sum(bets) + sum(p.amount for p in (pots or []))
 
         # min/max bet info
         # min_bet = state.min_completion_betting_or_raising_to_amount
