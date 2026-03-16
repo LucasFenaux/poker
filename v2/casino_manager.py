@@ -263,10 +263,9 @@ class CasinoManager:
                          for i in range(NUM_TRAINERS)]
         for trainer in self.trainers:
             trainer.start.remote()
+        # min and max stack params are defined in terms of # of big blinds
         self.min_stack = 50
-        self.max_stack = 1000
-        self.min_small_blind = 1
-        self.max_small_blind = 3
+        self.max_stack = 500
         self.min_bb_ratio = 1
         self.max_bb_ratio = 5
         self.min_allowed_start_bb = 10
@@ -429,10 +428,11 @@ class CasinoManager:
             players_left = [player for player in players_left if player not in player_ids]
             num_players_left = len(players_left)
 
-            small_blind = random.randint(self.min_small_blind, self.max_small_blind)
+            small_blind = 1  # we only deal with relative values anyways
             big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-            starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
-
+            # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
+            bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
+            starting_stacks = bb_starting_stacks * big_blind
             table_params = {
                 "raw_blinds_or_straddles": (small_blind, big_blind),
                 "min_bet": big_blind,
@@ -481,9 +481,11 @@ class CasinoManager:
             player_ids, table_size = self.table_scheduler.get_full_waiting_room()
             while player_ids is not None and table_size is not None:
                 # spin up a table
-                small_blind = random.randint(self.min_small_blind, self.max_small_blind)
+                small_blind = 1
                 big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-                starting_stacks = random.randint(max(self.min_stack, big_blind*10) , max(self.max_stack, big_blind*10))
+                # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
+                bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
+                starting_stacks = bb_starting_stacks * big_blind
 
                 table_params = {
                     "raw_blinds_or_straddles": (small_blind, big_blind),

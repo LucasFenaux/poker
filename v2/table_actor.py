@@ -31,8 +31,12 @@ class TableActor:
         self.max_table_size = max_table_size
         self.action_interpreter: ActionInterpreter = ActionInterpreter()
         self.num_games_played = 0
+        # number of games to play
+        # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
+        # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
+        # variety per batch -> lower quality data
+        self.replay = 10
 
-        self.replay = 10  # number of games to play
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
         self.game_player_ids = None   # game state facing view
@@ -258,23 +262,23 @@ class TableActor:
                 self.player_winnings[player_id] += self.game_starting_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
 
             # put the winnings and hand data in the queue
-            batch = []
-            for player_id, hand_info in self.hand_info.items():
-                player_winnings = self.player_winnings[player_id]
-                hand_info_ref = ray.put(hand_info)
-                p_index = self.player_ids.index(player_id)
-                p_version = self.current_player_versions[p_index]
-
-                batch.append({
-                    "type": "data",
-                    "table_id": self.table_id,
-                    "player_id": player_id,
-                    "hand_info": hand_info_ref,
-                    "player_winnings": player_winnings,
-                    "num_samples": len(hand_info["states"]),
-                    "version": p_version
-                })
-            self.out_queue.put_nowait_batch(batch)
+            # batch = []
+            # for player_id, hand_info in self.hand_info.items():
+            #     player_winnings = self.player_winnings[player_id]
+            #     hand_info_ref = ray.put(hand_info)
+            #     p_index = self.player_ids.index(player_id)
+            #     p_version = self.current_player_versions[p_index]
+            #
+            #     batch.append({
+            #         "type": "data",
+            #         "table_id": self.table_id,
+            #         "player_id": player_id,
+            #         "hand_info": hand_info_ref,
+            #         "player_winnings": player_winnings,
+            #         "num_samples": len(hand_info["states"]),
+            #         "version": p_version
+            #     })
+            # self.out_queue.put_nowait_batch(batch)
             self.num_games_played += 1
             return True
 
@@ -302,15 +306,46 @@ class TableActor:
 
                 player_params_list = [player.get_params() for player in players]
 
+                session_hand_info = {
+                    pid: {"states": [], "current_actors": [], "actions": [], "rewards": []}
+                    for pid in player_ids
+                }
+                session_player_winnings = {pid: 0.0 for pid in player_ids}
+
                 for _ in range(self.replay):
                     shuffle = list(range(len(player_ids)))
                     random.shuffle(shuffle)
                     shuffled_player_params_list = [player_params_list[i] for i in shuffle]
                     shuffled_player_ids = [player_ids[i] for i in shuffle]
                     self.reset(shuffled_player_params_list, shuffled_player_ids, **data["table_params"])
-                    self.play_game()
+                    success = self.play_game()
+
+                    if success:
+                        # ---> NEW: Aggregate data into the session accumulators
+                        for pid in player_ids:
+                            session_hand_info[pid]["states"].extend(self.hand_info[pid]["states"])
+                            session_hand_info[pid]["current_actors"].extend(self.hand_info[pid]["current_actors"])
+                            session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
+                            session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
+
+                            session_player_winnings[pid] += self.player_winnings[pid]
 
                 batch = []
+                # ---> NEW: Send the batched data exactly once per session
+                for pid in player_ids:
+                    p_index = player_ids.index(pid)
+                    p_version = self.current_player_versions[p_index]
+
+                    batch.append({
+                        "type": "data",
+                        "table_id": self.table_id,
+                        "player_id": pid,
+                        "hand_info": ray.put(session_hand_info[pid]),
+                        "player_winnings": session_player_winnings[pid],
+                        "num_samples": len(session_hand_info[pid]["states"]),
+                        "version": p_version
+                    })
+
                 # now we send back the players
                 for player_id in player_ids:
                     batch.append({
