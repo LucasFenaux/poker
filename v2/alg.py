@@ -49,19 +49,21 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
                 # "sgd_steps": 80,  # openai implementation
-                "sgd_steps": 10,
+                "sgd_steps": 5,
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
-                "value_lr": 1e-5,
-                "reward_normalization_scaler": 100
+                "value_lr": 5e-4,
+                "reward_normalization_scaler": 100,
+                "entropy_coef": 0.05
                 }
     key = "ppo"
     def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
-                 discrete: bool = False):
+                 entropy_coef, discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
         self.clip_threshold = clip_threshold
+        self.grad_norm_clip_threshold = 0.5
         self.target_kl = target_kl
         self.value_lr = value_lr
         network, value_network = self.init_networks(device, discrete)
@@ -71,6 +73,7 @@ class PPO(OnPolicyAlgorithm):
         self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
         self.discrete = discrete
         self.reward_normalization_scaler = reward_normalization_scaler
+        self.entropy_coef = entropy_coef
 
     @staticmethod
     def init_networks(device, discrete):
@@ -140,6 +143,8 @@ class PPO(OnPolicyAlgorithm):
         avg_loss = 0
         count = 0
         avg_v_loss = 0
+        avg_p_loss = 0
+        avg_e_loss = 0
 
         batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
         # batch_rewards = normalize_rewards(batch_rewards, self.env_name)
@@ -161,6 +166,9 @@ class PPO(OnPolicyAlgorithm):
 
             # update the value network
             value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
+
+            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_norm_clip_threshold)
+
             value_loss.backward()
             self.value_optimizer.step()
 
@@ -169,31 +177,49 @@ class PPO(OnPolicyAlgorithm):
             self.optimizer.zero_grad()
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
             logp = dist.log_prob(actions)
+
+            # add entropy regularization
+            entropy = dist.entropy()
+
             if not self.discrete:
                 logp = logp.sum(dim=-1)
+                entropy = entropy.sum(dim=-1)  # Sum entropy across action dimensions for continuous spaces
 
             approx_kl = logp_old - logp  # openai early_stop check
             if approx_kl.mean().item() > 1.5 * self.target_kl:
                 break
             ratio = torch.exp(logp - logp_old)
             # compute the sign-dependent advantage coefficient
-            loss = -torch.min(ratio * advantages.unsqueeze(1),
+            policy_loss = -torch.min(ratio * advantages.unsqueeze(1),
                               torch.clamp(ratio, 1.0 - self.clip_threshold, 1.0 + self.clip_threshold) * advantages.unsqueeze(1)).mean()
-            if not torch.isfinite(loss):
+            if not torch.isfinite(policy_loss):
                 print("WARNING: loss is not finite")
+
+            # add the entropy reg component
+            entropy_loss = entropy.mean()
+
+            loss = policy_loss - (self.entropy_coef * entropy_loss)
+
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_norm_clip_threshold)
 
             loss.backward()
             self.optimizer.step()
             avg_v_loss += value_loss.item()
             avg_loss += loss.item()
+            avg_p_loss += policy_loss.item()
+            avg_e_loss += entropy_loss.item()
             count += 1
         if count != 0:
             loss = avg_loss / count
             value_loss = avg_v_loss / count
+            policy_loss = avg_p_loss / count
+            entropy_loss = avg_e_loss / count
         else:
             loss = avg_loss
             value_loss = avg_v_loss
-        return {"loss": loss, "value_loss": value_loss}
+            policy_loss = avg_p_loss
+            entropy_loss = avg_e_loss
+        return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss}
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)

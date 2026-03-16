@@ -41,11 +41,15 @@ class TrainerActor:
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
                        batch_rnn_states=data_batch.get("batch_rnn_states", None))
             # trainer metrics
-            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Policy_Loss", metrics["loss"], self.num_training_ran)
+            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Loss", metrics["loss"], self.num_training_ran)
+            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)
+            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Policy_Loss", metrics["policy_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Value_Loss", metrics["value_loss"], self.num_training_ran)
 
-            self.writer.add_scalar(f"Player_{player_id}/Policy_Loss", metrics["loss"], player_training_count)
+            self.writer.add_scalar(f"Player_{player_id}/Policy_Loss", metrics["policy_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Value_Loss", metrics["value_loss"], player_training_count)
+            self.writer.add_scalar(f"Player_{player_id}/Loss", metrics["loss"], player_training_count)
+            self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
 
             # send the updated model params back to the manager
             new_weights = alg.get_params()

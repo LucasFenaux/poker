@@ -32,7 +32,7 @@ class TableActor:
         self.action_interpreter: ActionInterpreter = ActionInterpreter()
         self.num_games_played = 0
 
-        self.replay = 1  # number of games to play
+        self.replay = 10  # number of games to play
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
         self.game_player_ids = None   # game state facing view
