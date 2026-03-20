@@ -6,8 +6,11 @@ WORKDIR /app
 
 # Install system dependencies (needed for compiling some PyTorch/Ray C++ extensions)
 RUN apt-get update && apt-get install -y \
-    build-essential \
+    build-essential procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Install top for monitoring
+RUN #apt-get install -y procps
 
 # 🚀 The official way to install uv in Docker
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/

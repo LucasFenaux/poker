@@ -42,6 +42,7 @@ class DataStorage:
         self.current_actors = {player_id: [] for player_id in self.player_ids}
         self.rewards = {player_id: [] for player_id in self.player_ids}
         self.actions = {player_id: [] for player_id in self.player_ids}
+        self.sample_weights = {player_id: [] for player_id in self.player_ids}
         self.on_policy = on_policy
 
     # def start(self):
@@ -71,6 +72,7 @@ class DataStorage:
         self.rewards[player_id].extend(hand_info["rewards"])
         self.current_actors[player_id].extend(hand_info["current_actors"])
         self.actions[player_id].extend(hand_info["actions"])
+        self.sample_weights[player_id].extend(hand_info["sample_weights"])
         return self.can_train(player_id)
 
     def can_train(self, player_id):
@@ -84,6 +86,7 @@ class DataStorage:
         assert len(self.rewards[player_id]) >= self.batch_size
         assert len(self.actions[player_id]) >= self.batch_size
         assert len(self.current_actors[player_id]) >= self.batch_size
+        assert len(self.sample_weights[player_id]) >= self.batch_size
 
         # since we are gonna train on the data, if we have a ONPolicy alg, we need to get rid of the extra
 
@@ -91,22 +94,26 @@ class DataStorage:
         current_actors = self.current_actors[player_id][:self.batch_size]
         rewards = self.rewards[player_id][:self.batch_size]
         actions = self.actions[player_id][:self.batch_size]
+        sample_weights = self.sample_weights[player_id][:self.batch_size]
 
         if self.on_policy:
             self.states[player_id] = []
             self.current_actors[player_id] = []
             self.rewards[player_id] = []
             self.actions[player_id] = []
+            self.sample_weights[player_id] = []
         else:
             self.states[player_id] = self.states[player_id][self.batch_size:]
             self.current_actors[player_id] = self.current_actors[player_id][self.batch_size:]
             self.rewards[player_id] = self.rewards[player_id][self.batch_size:]
             self.actions[player_id] = self.actions[player_id][self.batch_size:]
+            self.sample_weights[player_id] = self.sample_weights[player_id][self.batch_size:]
 
         return {
             "states": (states, current_actors),
             "rewards": rewards,
-            "actions": actions
+            "actions": actions,
+            "sample_weights": sample_weights,
         }
 
 # @ray.remote(num_cpus=0)

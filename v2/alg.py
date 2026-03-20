@@ -55,7 +55,7 @@ class PPO(OnPolicyAlgorithm):
                 "lr": 1e-4,
                 "value_lr": 5e-4,
                 "reward_normalization_scaler": 100,
-                "entropy_coef": 0.05
+                "entropy_coef": 1e-8
                 }
     key = "ppo"
     def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
@@ -99,7 +99,8 @@ class PPO(OnPolicyAlgorithm):
     def get_params(self):
         return [self.network.state_dict(), self.value_network.state_dict()]
 
-    def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, *args, **kwargs):
+    def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
+               **kwargs):
         if isinstance(batch_rewards[0], torch.Tensor):
             batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
         else:
@@ -133,6 +134,12 @@ class PPO(OnPolicyAlgorithm):
                 new_cs.append(c)
             batch_rnn_states = (torch.cat(new_hs, dim=1), torch.cat(new_cs, dim=1))
 
+        if sample_weights is not None:
+            sample_weights = torch.tensor(sample_weights, device=self.device)
+            assert sample_weights.dim() == 1
+            normalized_sample_weights = sample_weights / sample_weights.mean()
+            prob_sample_weights = sample_weights / sample_weights.sum()
+
         old_network = copy.deepcopy(self.network)
         old_network.requires_grad_(False)  # get a copy of the current network
         dist_old = self.get_model_policy(old_network, states, batch_rnn_states)
@@ -162,14 +169,26 @@ class PPO(OnPolicyAlgorithm):
             advantages = batch_rewards - value_function.clone().detach()
 
             # mean/std normalize the advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            if sample_weights is None:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            else:
+                # we do weighted normalization
+                weighted_mean = (advantages * prob_sample_weights).sum()
+                weighted_var = (prob_sample_weights * ((advantages - weighted_mean) ** 2)).sum()
+                weighted_std = torch.sqrt(weighted_var + 1e-8)
+                advantages = (advantages - weighted_mean) / (weighted_std + 1e-8)
 
             # update the value network
-            value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
-
-            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_norm_clip_threshold)
+            if sample_weights is None:
+                value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
+            else:
+                value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards, reduction="none")
+                assert value_loss.dim() == normalized_sample_weights.dim()
+                value_loss = (value_loss * normalized_sample_weights).mean()
 
             value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_norm_clip_threshold)
+
             self.value_optimizer.step()
 
             # we then update the policy network
@@ -190,8 +209,14 @@ class PPO(OnPolicyAlgorithm):
                 break
             ratio = torch.exp(logp - logp_old)
             # compute the sign-dependent advantage coefficient
-            policy_loss = -torch.min(ratio * advantages.unsqueeze(1),
-                              torch.clamp(ratio, 1.0 - self.clip_threshold, 1.0 + self.clip_threshold) * advantages.unsqueeze(1)).mean()
+            policy_loss = -torch.min(ratio * advantages, torch.clamp(ratio, 1.0 - self.clip_threshold,
+                                                                     1.0 + self.clip_threshold) * advantages)
+            if sample_weights is None:
+                policy_loss = policy_loss.mean()
+            else:
+                # we do a weighted mean
+                policy_loss = (policy_loss * normalized_sample_weights).mean()
+
             if not torch.isfinite(policy_loss):
                 print("WARNING: loss is not finite")
 
@@ -200,9 +225,9 @@ class PPO(OnPolicyAlgorithm):
 
             loss = policy_loss - (self.entropy_coef * entropy_loss)
 
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_norm_clip_threshold)
 
-            loss.backward()
             self.optimizer.step()
             avg_v_loss += value_loss.item()
             avg_loss += loss.item()

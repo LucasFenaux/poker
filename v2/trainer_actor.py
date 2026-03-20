@@ -30,16 +30,10 @@ class TrainerActor:
         try:
             alg = PPO(device=self.device, discrete=self.discrete, **PPO.default_hyperparameters)
             alg.load_params(player_state_dicts)
-            # load the state_dict into the model
-            # self.model.load_state_dict(player_state_dict)
-            # self.model.train()
-            # self.model = self.model.to(self.device)
-
-            # create the training algorithm
-
             # run the model update
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
-                       batch_rnn_states=data_batch.get("batch_rnn_states", None))
+                                 batch_rnn_states=data_batch.get("batch_rnn_states", None),
+                                 sample_weights=data_batch.get("sample_weights", None))
             # trainer metrics
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Loss", metrics["loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)

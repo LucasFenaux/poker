@@ -1,4 +1,6 @@
 import copy
+
+import pokerkit
 import ray
 from ray.util.queue import Queue, Empty
 from pokerkit import NoLimitTexasHoldem, Automation
@@ -19,7 +21,8 @@ class TableActor:
         "raw_blinds_or_straddles": (1, 2),
         "min_bet": 2,
         "raw_starting_stacks": 100,
-        "player_count": 2
+        "player_count": 2,
+        "mode": "tree"
     }
 
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool):
@@ -35,7 +38,8 @@ class TableActor:
         # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
-        self.replay = 10
+        self.replay = 1
+        self.tree_expansion = 3
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
@@ -52,6 +56,8 @@ class TableActor:
         self.hand_info = None
         self.current_hand = None
         self.player_winnings: dict[int, float] = None
+        self.mode = None
+        self._play_round = None
 
     def reset(self, players_params_list, player_ids, **table_params):
         self.player_ids = player_ids
@@ -85,6 +91,14 @@ class TableActor:
 
         self.game_starting_stacks = self.starting_stacks[:]
 
+        self.mode = self.game_params.pop("mode")
+        if self.mode == "linear":
+            self._play_round = self._play_linear_round
+        elif self.mode == "tree":
+            self._play_round = self._play_tree_round
+        else:
+            raise NotImplementedError(self.mode)
+
         self._reset_hand_info()
             
     def _reset_hand_info(self):
@@ -94,7 +108,8 @@ class TableActor:
                 "states": [],
                 "current_actors": [],
                 "actions": [],
-                "rewards": []
+                "rewards": [],
+                "sample_weights": [],
             }
         self._reset_current_hand()
 
@@ -105,9 +120,206 @@ class TableActor:
                 "states": [],
                 "current_actors": [],
                 "actions": [],
+                "sample_weights": [],
             }
 
-    def _play_round(self):
+    def _take_action(self, state, player_action):
+        # we convert the action into something we can use
+        min_bet = state.min_completion_betting_or_raising_to_amount
+        if min_bet is None:
+            min_bet = max(state.bets)
+
+        max_bet = state.max_completion_betting_or_raising_to_amount
+        if max_bet is None:
+            max_bet = min_bet  # Or some other logical fallback
+
+        interpreted_action, bet_sizing = self.action_interpreter(player_action, min_bet, max_bet)
+
+        if interpreted_action == Action.CHECK_OR_FOLD:
+            if state.can_check_or_call() and state.checking_or_calling_amount == 0:
+                state.check_or_call()
+            elif state.can_fold():
+                state.fold()
+            else:
+                raise RuntimeError("No legal action in CHECK_OR_FOLD branch")
+        elif interpreted_action == Action.CHECK_OR_CALL:
+            if state.can_check_or_call():
+                state.check_or_call()
+            elif state.can_fold():
+                # we can't actually check or call so we have to fold
+                state.fold()
+            else:
+                raise RuntimeError("No legal fallback from CHECK_OR_CALL")
+        elif interpreted_action == Action.RAISE:
+            # we want to raise, we use the bet_sizing provided
+            if state.can_complete_bet_or_raise_to(bet_sizing):
+                state.complete_bet_or_raise_to(bet_sizing)
+            elif state.can_check_or_call():
+                state.check_or_call()
+            elif state.can_fold():
+                state.fold()
+            else:
+                raise RuntimeError("No legal fallback from RAISE")
+        else:
+            assert interpreted_action == Action.ALL_IN
+            all_in_size = state.max_completion_betting_or_raising_to_amount
+            if state.can_complete_bet_or_raise_to(all_in_size):
+                state.complete_bet_or_raise_to(all_in_size)
+            elif state.can_check_or_call():
+                state.check_or_call()
+            elif state.can_fold():
+                state.fold()
+            else:
+                raise RuntimeError("No legal fallback from ALL_IN")
+
+    def _play_tree_level(self, state: pokerkit.State, depth):
+        assert depth < 4
+        snapshots = {player_id: [] for player_id in self.game_player_ids}
+        current_actors = {player_id: [] for player_id in self.game_player_ids}
+        player_actions = {player_id: [] for player_id in self.game_player_ids}
+        sample_weights = {player_id: [] for player_id in self.game_player_ids}
+        rewards = {player_id: [] for player_id in self.game_player_ids}
+
+        while state.status and not state.can_deal_board():
+            # play this level until the next street
+            current_actor = state.actor_index
+            player = self.game_players[current_actor]
+            player_id = self.game_player_ids[current_actor]
+            snapshot = extract_state_snapshot(state, current_actor)
+
+            try:
+                with torch.no_grad():
+                    player_action_tensor = player.get_action((snapshot, current_actor))
+                    player_action = player_action_tensor.detach().cpu()
+            except Exception as e:
+                print(state)
+                raise e
+
+            # we log the state and action for player training
+            snapshots[player_id].append(snapshot)
+            current_actors[player_id].append(current_actor)
+            player_actions[player_id].append(player_action)
+            sample_weights[player_id].append(1./(self.tree_expansion ** depth))
+
+            self._take_action(state, player_action)
+
+        if not state.status:
+            # we reached the last street level, we can compute the rewards
+            final_game_stacks = state.stacks[:]
+            expected_rewards = {}  # Store scalar expected values safely
+            for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
+                                                                            self.game_starting_stacks)):
+                reward = (final_game_stack - game_starting_stack) / (self.game_params["raw_blinds_or_straddles"][-1])
+                player_id = self.game_player_ids[i]
+                hand_rewards = [reward] * len(snapshots[player_id])
+                rewards[player_id] = hand_rewards
+                expected_rewards[player_id] = reward  # Safe scalar value
+            return snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards
+
+        current_level_counts = {player_id: len(snapshots[player_id]) for player_id in self.game_player_ids}
+        children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion - 1)]
+        children_states.append(state)  # Saves 1 expensive deepcopy per node
+
+        # we create the children
+        # children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion)]
+        level_rewards = {player_id: 0 for player_id in self.game_player_ids}
+        for child_state in children_states:
+            # deal the board cards to make the street index move forward
+            child_state.deal_board()
+            (child_snapshots, child_current_actors, child_player_actions, child_sample_weights, child_rewards,
+             child_expected_rewards) = self._play_tree_level(child_state, depth + 1)
+
+            # we assume that everything is already in the correct order, so we can use the 0 element to get the child's
+            # reward
+            for player_id in self.game_player_ids:
+                level_rewards[player_id] += child_expected_rewards[player_id]
+
+                snapshots[player_id].extend(child_snapshots[player_id])
+                current_actors[player_id].extend(child_current_actors[player_id])
+                player_actions[player_id].extend(child_player_actions[player_id])
+                sample_weights[player_id].extend(child_sample_weights[player_id])
+                rewards[player_id].extend(child_rewards[player_id])
+
+        for player_id in self.game_player_ids:
+            level_rewards[player_id] /= len(children_states)  # average between children
+            # prepend the rewards
+            rewards[player_id] = [level_rewards[player_id]] * current_level_counts[player_id] + rewards[player_id]
+
+        return snapshots, current_actors, player_actions, sample_weights, rewards, level_rewards
+
+    def _play_tree_round(self):
+        try:
+            state = NoLimitTexasHoldem.create_state(
+                (
+                    Automation.ANTE_POSTING,
+                    Automation.BET_COLLECTION,
+                    Automation.BLIND_OR_STRADDLE_POSTING,
+                    Automation.CARD_BURNING,
+                    Automation.HOLE_DEALING,
+                    # Automation.BOARD_DEALING,
+                    Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
+                    Automation.HAND_KILLING,
+                    Automation.CHIPS_PUSHING,
+                    Automation.CHIPS_PULLING,
+                ),
+                raw_starting_stacks=self.game_starting_stacks,
+                **self.game_params
+            )
+            snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards = self._play_tree_level(state, 0)
+            # for the reward to update the overarching game state (and leaderboard), we simply use the mean reward
+            # over all rollouts, which should be given to use by the first reward in the list for each player
+            busted_out = []
+            final_game_stacks = []
+            for i, player_id in enumerate(self.game_player_ids):
+                reward_in_bbs = expected_rewards[player_id]
+                chip_delta = reward_in_bbs * self.game_params["raw_blinds_or_straddles"][-1]
+                final_game_stack = self.game_starting_stacks[i] + chip_delta
+                final_game_stacks.append(final_game_stack)
+
+                self.hand_info[player_id]["states"].extend(snapshots[player_id])
+                self.hand_info[player_id]["current_actors"].extend(current_actors[player_id])
+                self.hand_info[player_id]["actions"].extend(player_actions[player_id])
+                self.hand_info[player_id]["rewards"].extend(rewards[player_id])
+                self.hand_info[player_id]["sample_weights"].extend(sample_weights[player_id])
+
+                if final_game_stack < self.game_params["min_bet"]:
+                    # player is busted out
+                    # update game view to remove the busted out player
+                    busted_out.append(i)
+
+            busted_out.sort(reverse=True)   # bust from largest index to lowest index so we don't change indices as we bust
+
+            for i in busted_out:
+                player_id = self.game_player_ids[i]
+
+                j = self.player_ids.index(player_id)
+                self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
+
+                final_game_stacks.pop(i)
+                self.game_players.pop(i)
+                self.game_starting_stacks.pop(i)
+                self.game_player_ids.pop(i)
+
+                self.game_params["player_count"] = len(self.game_player_ids)
+
+            # update the player game stacks
+            self.game_starting_stacks = final_game_stacks
+
+            if self.game_params["player_count"] < 2:
+                return True
+
+            # rotate the spots
+            self.game_players.append(self.game_players.pop(0))
+            self.game_player_ids.append(self.game_player_ids.pop(0))
+            self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
+
+            return False
+        except Exception as e:
+            # raise e
+            print(f"Exception: {e} encountered in Table {self.table_id}")
+            return False
+
+    def _play_linear_round(self):
         try:
             state = NoLimitTexasHoldem.create_state(
                 (
@@ -144,54 +356,9 @@ class TableActor:
                 self.current_hand[player_id]["states"].append(snapshot)
                 self.current_hand[player_id]["current_actors"].append(current_actor)
                 self.current_hand[player_id]["actions"].append(player_action)
+                self.current_hand[player_id]["sample_weights"].append(1.)
 
-                # we convert the action into something we can use
-                min_bet = state.min_completion_betting_or_raising_to_amount
-                if min_bet is None:
-                    min_bet = max(state.bets)
-
-                max_bet = state.max_completion_betting_or_raising_to_amount
-                if max_bet is None:
-                    max_bet = min_bet  # Or some other logical fallback
-
-                interpreted_action, bet_sizing = self.action_interpreter(player_action, min_bet, max_bet)
-
-                if interpreted_action == Action.CHECK_OR_FOLD:
-                    if state.can_check_or_call() and state.checking_or_calling_amount == 0:
-                        state.check_or_call()
-                    elif state.can_fold():
-                        state.fold()
-                    else:
-                        raise RuntimeError("No legal action in CHECK_OR_FOLD branch")
-                elif interpreted_action == Action.CHECK_OR_CALL:
-                    if state.can_check_or_call():
-                        state.check_or_call()
-                    elif state.can_fold():
-                        # we can't actually check or call so we have to fold
-                        state.fold()
-                    else:
-                        raise RuntimeError("No legal fallback from CHECK_OR_CALL")
-                elif interpreted_action == Action.RAISE:
-                    # we want to raise, we use the bet_sizing provided
-                    if state.can_complete_bet_or_raise_to(bet_sizing):
-                        state.complete_bet_or_raise_to(bet_sizing)
-                    elif state.can_check_or_call():
-                        state.check_or_call()
-                    elif state.can_fold():
-                        state.fold()
-                    else:
-                        raise RuntimeError("No legal fallback from RAISE")
-                else:
-                    assert interpreted_action == Action.ALL_IN
-                    all_in_size = state.max_completion_betting_or_raising_to_amount
-                    if state.can_complete_bet_or_raise_to(all_in_size):
-                        state.complete_bet_or_raise_to(all_in_size)
-                    elif state.can_check_or_call():
-                        state.check_or_call()
-                    elif state.can_fold():
-                        state.fold()
-                    else:
-                        raise RuntimeError("No legal fallback from ALL_IN")
+                self._take_action(state, player_action)
 
             # compute rewards
             final_game_stacks = state.stacks[:]
@@ -208,6 +375,7 @@ class TableActor:
                 self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
                 self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
                 self.hand_info[player_id]["rewards"].extend(hand_rewards)
+                self.hand_info[player_id]["sample_weights"].extend(self.current_hand[player_id]["sample_weights"])
 
                 if final_game_stack < self.game_params["min_bet"]:
                     # player is busted out
@@ -249,11 +417,14 @@ class TableActor:
     def play_game(self):
         try:
             done = False
+            counter = 0
             while not done:
                 done = self._play_round()
 
                 self._reset_current_hand()
-
+                counter += 1
+            if counter % 100 == 0:
+                print(counter)
             # need to save the remaining player's winnings
             # update player winnings
             for i, player_id in enumerate(self.game_player_ids):
@@ -261,24 +432,6 @@ class TableActor:
                 j = self.player_ids.index(player_id)
                 self.player_winnings[player_id] += self.game_starting_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
 
-            # put the winnings and hand data in the queue
-            # batch = []
-            # for player_id, hand_info in self.hand_info.items():
-            #     player_winnings = self.player_winnings[player_id]
-            #     hand_info_ref = ray.put(hand_info)
-            #     p_index = self.player_ids.index(player_id)
-            #     p_version = self.current_player_versions[p_index]
-            #
-            #     batch.append({
-            #         "type": "data",
-            #         "table_id": self.table_id,
-            #         "player_id": player_id,
-            #         "hand_info": hand_info_ref,
-            #         "player_winnings": player_winnings,
-            #         "num_samples": len(hand_info["states"]),
-            #         "version": p_version
-            #     })
-            # self.out_queue.put_nowait_batch(batch)
             self.num_games_played += 1
             return True
 
@@ -307,7 +460,7 @@ class TableActor:
                 player_params_list = [player.get_params() for player in players]
 
                 session_hand_info = {
-                    pid: {"states": [], "current_actors": [], "actions": [], "rewards": []}
+                    pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": []}
                     for pid in player_ids
                 }
                 session_player_winnings = {pid: 0.0 for pid in player_ids}
@@ -327,6 +480,7 @@ class TableActor:
                             session_hand_info[pid]["current_actors"].extend(self.hand_info[pid]["current_actors"])
                             session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
                             session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
+                            session_hand_info[pid]["sample_weights"].extend(self.hand_info[pid]["sample_weights"])
 
                             session_player_winnings[pid] += self.player_winnings[pid]
 
