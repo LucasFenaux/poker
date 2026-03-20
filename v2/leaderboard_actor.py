@@ -4,6 +4,7 @@ import json
 import os
 import asyncio
 from fractions import Fraction
+from global_settings import NUM_TRAINERS, NUM_TABLES
 
 
 class PokerEncoder(json.JSONEncoder):
@@ -27,7 +28,9 @@ class PokerEncoder(json.JSONEncoder):
 
 @ray.remote(num_cpus=0)
 class LeaderboardActor:
-    def __init__(self, queue: Queue, player_ids, save_folder: str = "./"):
+    def __init__(self, queue: Queue, table_send_queue: Queue, table_receive_queue: Queue,
+                 trainer_send_queue: Queue, trainer_receive_queue: Queue,
+                 player_ids, save_folder: str = "./"):
         self.queue = queue
         self.save_folder = save_folder
         self.history_player_winnings = {player_id: [] for player_id in player_ids}
@@ -36,6 +39,14 @@ class LeaderboardActor:
         self.number_games_played = {player_id: 0 for player_id in player_ids}
         self.is_done = False
         self.last_saved_avg = -1
+        self.table_send_queue = table_send_queue
+        self.table_receive_queue = table_receive_queue
+        self.trainer_send_queue = trainer_send_queue
+        self.trainer_receive_queue = trainer_receive_queue
+        self.num_tables = 0
+        self.num_trainers = 0
+        self.target_num_tables = None
+        self.target_num_trainers = None
 
     async def start(self):
         while not self.is_done:
@@ -45,7 +56,9 @@ class LeaderboardActor:
                 data = await asyncio.wait_for(self.queue.get_async(), timeout=1.0)
 
                 if data is not None:
-                    player_id, player_winnings = data
+                    player_id, player_winnings, num_tables, num_trainers = data
+                    self.num_tables = num_tables
+                    self.num_trainers = num_trainers
                     self.update(player_id, player_winnings)
 
             except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!
@@ -53,6 +66,67 @@ class LeaderboardActor:
 
         # Use asyncio.sleep instead of time.sleep in an async method
         await asyncio.sleep(10)
+
+        # ---> NEW: Methods to handle target counts and resets
+
+    async def set_target_tables(self, target: int):
+        # Initialize target to actual on the very first adjustment
+        if self.target_num_tables is None:
+            self.target_num_tables = self.num_tables
+
+        diff = target - self.target_num_tables
+        self.target_num_tables = target
+
+        if diff > 0:
+            for _ in range(diff):
+                await self.request_table_creation()
+        elif diff < 0:
+            for _ in range(abs(diff)):
+                await self.request_table_removal()
+
+    async def set_target_trainers(self, target: int):
+        if self.target_num_trainers is None:
+            self.target_num_trainers = self.num_trainers
+
+        diff = target - self.target_num_trainers
+        self.target_num_trainers = target
+
+        if diff > 0:
+            for _ in range(diff):
+                await self.request_trainer_creation()
+        elif diff < 0:
+            for _ in range(abs(diff)):
+                await self.request_trainer_removal()
+
+    async def reset_to_defaults(self):
+        await self.set_target_tables(NUM_TABLES)
+        await self.set_target_trainers(NUM_TRAINERS)
+
+    async def request_table_removal(self):
+        message = {
+            "type": "message",
+            "terminate": True
+        }
+        await self.table_send_queue.put_async(message)
+
+    async def request_table_creation(self):
+        message = {
+            "type": "creation"
+        }
+        await self.table_receive_queue.put_async(message)
+
+    async def request_trainer_removal(self):
+        message = {
+            "type": "message",
+            "terminate": True
+        }
+        await self.trainer_send_queue.put_async(message)
+
+    async def request_trainer_creation(self):
+        message = {
+            "type": "creation"
+        }
+        await self.trainer_receive_queue.put_async(message)
 
     def set_done(self):
         self.is_done = True
@@ -98,16 +172,20 @@ class LeaderboardActor:
 
     def get_leaderboard_stats(self):
         all_time, recent_top = self.generate_leaderboard_data()
-
-        # Calculate the AVERAGE games played
         total_games = sum(self.number_games_played.values())
         avg_games = total_games / max(1, len(self.player_ids))
 
         return {
             "all_time": all_time,
             "recent": recent_top,
-            "avg_games": avg_games,  # Replaced total_games
-            "is_done": self.is_done
+            "avg_games": avg_games,
+            "is_done": self.is_done,
+            "num_players": len(self.player_ids),
+            "num_tables": self.num_tables,
+            "num_trainers": self.num_trainers,
+            # ---> NEW: Pass target data to GUI
+            "target_tables": self.target_num_tables if self.target_num_tables is not None else self.num_tables,
+            "target_trainers": self.target_num_trainers if self.target_num_trainers is not None else self.num_trainers
         }
 
     def save(self):

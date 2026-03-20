@@ -47,13 +47,23 @@ class TrainerActor:
 
             # send the updated model params back to the manager
             new_weights = alg.get_params()
-            self.out_queue.put((player_id, new_weights))
+            message = {
+                "type": "player",
+                "player_id": player_id,
+                "new_weights": new_weights,
+            }
+            self.out_queue.put(message)
             self.num_training_ran += 1
             return new_weights
         except Exception as e:
             print(f"Exception: {e} encountered in Trainer {self.trainer_id} training player: {player_id}")
             # abort training and send back the original weights
-            self.out_queue.put((player_id, player_state_dicts))
+            message = {
+                "type": "player",
+                "player_id": player_id,
+                "new_weights": player_state_dicts,
+            }
+            self.out_queue.put(message)
             return None
 
     def start(self):
@@ -64,8 +74,14 @@ class TrainerActor:
                 continue
 
             if data["type"] == "message":
-                terminate = data.get("terminate", True)  # by default we assume that we need to terminate in case of a malformed message
+                terminate = data.get("terminate", False)  # by default we assume that we need to terminate in case of a malformed message
                 if terminate:
+                    # we need to send a message to the manager to alert him that we are terminating
+                    message = {
+                        "type": "termination",
+                        "trainer_id": self.trainer_id,
+                    }
+                    self.out_queue.put(message)
                     return True
 
             assert data["type"] == "player"

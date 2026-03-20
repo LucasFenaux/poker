@@ -32,8 +32,12 @@ def get_save_folder(base_path="results"):
 
 
 if __name__ == '__main__':
-    ray.init("auto", namespace="casino")
-    device = torch.device("cpu")
-    save_folder = get_save_folder()
-    manager: CasinoManager = CasinoManager(device, save_folder=save_folder)
-    manager.start()
+    try:
+        ray.init("auto", namespace="casino")
+        device = torch.device("cpu")
+        save_folder = get_save_folder()
+        manager: CasinoManager = CasinoManager(device, save_folder=save_folder)
+        manager.start()
+        ray.shutdown()
+    except Exception as e:
+        ray.shutdown()

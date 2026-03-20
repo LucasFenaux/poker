@@ -45,27 +45,6 @@ class DataStorage:
         self.sample_weights = {player_id: [] for player_id in self.player_ids}
         self.on_policy = on_policy
 
-    # def start(self):
-    #     while True:
-    #         # see if we need to add any new data to the buffer
-    #         try:
-    #             data = self.in_queue.get(block=True, timeout=1)
-    #         except Empty:
-    #             continue
-    #         if data is not None:
-    #             player_id = data["player_id"]
-    #             hand_info_ref = data["hand_info_ref"]
-    #             can_train = self.add(player_id, hand_info_ref)
-    #             while can_train:
-    #                 # put the data in the out_queue
-    #                 batch = self.get_batch(player_id)
-    #                 batch_ref = ray.put(batch)
-    #                 self.out_queue.put({
-    #                     "player_id": player_id,
-    #                     "batch_ref": batch_ref
-    #                 })
-    #                 can_train = self.can_train(player_id)
-
     def add(self, player_id, hand_info_ref):
         hand_info: dict[str, Any] = ray.get(hand_info_ref)
         self.states[player_id].extend(hand_info["states"])
@@ -130,26 +109,6 @@ class TableScheduler:
         self.next_table_size = [random.randint(table_min_size, table_max_size)] * len(self.waiting_rooms)
         self.last_table_played_at: dict[int, int] = {player_id: None for player_id in player_ids}
         # TODO: implement a new way to do the waiting room so I don't have only table max size ** 2 players playing
-
-    # def start(self):
-    #     while True:
-    #         try:
-    #             data = self.in_queue.get(block=True, timeout=1)
-    #         except Empty:
-    #             continue
-    #         if data is not None:
-    #             player_id, table_id = data["player_id"], data["table_id"]
-    #             self.add(player_id, table_id)
-    #
-    #         # see if we have any full waiting rooms
-    #         player_ids, table_size = self.get_full_waiting_room()
-    #         while player_ids is not None and table_size is not None:
-    #             data = {
-    #                 "player_ids": player_ids,
-    #                 "table_size": table_size
-    #             }
-    #             self.out_queue.put(data)
-    #             player_ids, table_size = self.get_full_waiting_room()
 
     def all_waiting_rooms_are_full(self):
         for waiting_room, next_table_size in zip(self.waiting_rooms, self.next_table_size):
@@ -216,14 +175,7 @@ class CasinoManager:
         self.log_folder = os.path.join(save_folder, "logs")
 
         self.is_playing = {player_id: False for player_id in self.player_ids}
-        self.leaderboard_queue = Queue(maxsize=0)
-        # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
-        self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
-            self.leaderboard_queue, self.player_ids, save_folder)
-
-        self.leaderboard.start.remote()
         # we spin up the player models
-        # self.players = [load_model(player_id, device, discrete) for player_id in self.player_ids]
         self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete))) for _ in
                         self.player_ids]
         self.player_training_counts = [0] * len(self.player_ids)
@@ -233,12 +185,7 @@ class CasinoManager:
         self.batch_size = 5000
         self.on_policy = True
 
-        # self.scheduler_send_queue = Queue(maxsize=0)
-        # self.scheduler_receive_queue = Queue(maxsize=0)
-        # self.table_scheduler = TableScheduler.remote(self.scheduler_send_queue, self.scheduler_receive_queue,
-        #                                              self.table_min_size, self.table_max_size, self.player_ids)
         self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
-        # self.table_scheduler.start.remote()
 
         self.table_send_queue = Queue(maxsize=0)
         self.table_receive_queue = Queue(maxsize=0)
@@ -249,27 +196,30 @@ class CasinoManager:
         # max_tables_needed = len(self.player_ids) // self.table_min_size
         print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
               f"{self.table_max_size}...")
+        self.table_ids = [table_id for table_id in range(NUM_TABLES)]
         self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
-                                         self.table_max_size, discrete) for table_id in range(NUM_TABLES)]   # we spin up the tables at the beginning to avoid the churn
+                                         self.table_max_size, discrete) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
         for table in self.tables:
             table.start.remote()
 
-        # self.data_storage_send_queue = Queue(maxsize=0)
-        # self.data_storage_receive_queue = Queue(maxsize=0)
-        # self.data_storage = DataStorage.remote(self.data_storage_send_queue, self.data_storage_receive_queue,
-        #                                        self.player_ids, self.batch_size, self.on_policy)
         self.data_storage = DataStorage(self.player_ids, self.batch_size, self.on_policy)
-        # self.data_storage.start.remote()
 
-        # need to locally track the number of samples per player to avoid sending them to a table when they are going
-        # to training
-        # self.num_samples = {player_id: 0 for player_id in self.player_ids}
-
+        self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
         self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
                                              self.log_folder, self.player_save_folder)
-                         for i in range(NUM_TRAINERS)]
+                         for i in self.trainer_ids]
         for trainer in self.trainers:
             trainer.start.remote()
+
+        self.leaderboard_queue = Queue(maxsize=0)
+        # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
+        self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
+            self.leaderboard_queue, self.table_send_queue, self.table_receive_queue, self.trainer_send_queue,
+            self.trainer_receive_queue, self.player_ids, save_folder)
+
+        self.leaderboard.start.remote()
+
+        self.discrete = discrete
         # min and max stack params are defined in terms of # of big blinds
         self.min_stack = 50
         self.max_stack = 500
@@ -279,39 +229,57 @@ class CasinoManager:
         self.stop_event = threading.Event()
         available = ray.available_resources()
         free_cpus = available.get('CPU', 0)
-        assert free_cpus >= 0, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
+        assert free_cpus > 0, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
                                                 f"requested.")
 
     def receive_from_trainer_queue(self):
         queue_empty = False
         try:
-            player_id, new_weights = self.trainer_receive_queue.get_nowait()
+            message = self.trainer_receive_queue.get_nowait()
         except Empty:
             # queue is empty, we continue with our loop
             queue_empty = True
             player_id, new_weights = None, None
+            message = None
 
         if not queue_empty:
-            # update that player's model weights
-            player: PlayerAI = ray.get(self.players[player_id])
-            player.load_params(new_weights)
-            self.players[player_id] = ray.put(player)
-            self.player_training_counts[player_id] += 1
-            # if self.on_policy:
-            #     self.num_samples[player_id] = 0 # training resets the number of samples
-            # else:
-            #     self.num_samples[player_id] -= self.batch_size
+            if message["type"] == "player":
+                player_id, new_weights = message["player_id"], message["new_weights"]
+                # update that player's model weights
+                player: PlayerAI = ray.get(self.players[player_id])
+                player.load_params(new_weights)
+                self.players[player_id] = ray.put(player)
+                self.player_training_counts[player_id] += 1
 
-            if not self.data_storage.can_train(player_id):
-                # add the player to the table scheduler
-                # self.table_scheduler.add(player_id, None)
-                if not self.is_playing[player_id]:
-                    self.table_scheduler.add(player_id)
-                    # self.scheduler_send_queue.put_nowait({
-                    #     "player_id": player_id,
-                    #     "table_id": None,
-                    # })
-        return queue_empty, player_id
+                if not self.data_storage.can_train(player_id):
+                    # add the player to the table scheduler
+                    if not self.is_playing[player_id]:
+                        self.table_scheduler.add(player_id)
+
+            elif message["type"] == "termination":
+                trainer_id = message["trainer_id"]
+                # we get the table with that index
+                print(f"Terminating Trainer {trainer_id}")
+                trainer_idx = self.trainer_ids.index(trainer_id)
+                trainer = self.trainers.pop(trainer_idx)
+                self.trainer_ids.pop(trainer_idx)
+                ray.kill(trainer)
+
+            elif message["type"] == "creation":
+                # we find a suitable table id
+                trainer_id = 0
+                existing_trainer_ids = set(self.trainer_ids)
+                while trainer_id in existing_trainer_ids:
+                    trainer_id += 1
+
+                print(f"Creating Trainer {trainer_id}")
+                self.trainer_ids.append(trainer_id)
+                new_trainer = TrainerActor.remote(trainer_id, self.trainer_send_queue, self.trainer_receive_queue, self.device,
+                                    self.discrete, self.log_folder, self.player_save_folder)
+                self.trainers.append(new_trainer)
+                new_trainer.start.remote()
+
+        return queue_empty
 
     def receive_from_table_queue(self):
         queue_empty = False
@@ -324,28 +292,24 @@ class CasinoManager:
 
         if not queue_empty:
             # add the data to the data storage
-            player_id, table_id = data["player_id"], data["table_id"]
-
             if data["type"] == "data":
+                player_id, table_id = data["player_id"], data["table_id"]
+
                 hand_info, player_winnings = data["hand_info"], data["player_winnings"]
-                num_samples = data["num_samples"]
                 data_version = data["version"]
 
                 if data_version == self.player_training_counts[player_id]:
                     # Only add data from the same model version as the current one
-                    # self.num_samples[player_id] += num_samples
-                    # self.data_storage_send_queue.put_nowait({
-                    #     "player_id": player_id,
-                    #     "hand_info_ref": hand_info,
-                    # })
+
                     self.data_storage.add(player_id, hand_info)
 
                 # send the player_winnings to the leaderboard
-                self.leaderboard_queue.put_nowait((player_id, player_winnings))
+                self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids)))
 
             elif data["type"] == "player":
+                player_id, table_id = data["player_id"], data["table_id"]
+
                 self.is_playing[player_id] = False  # Mark them as free!
-                # self.table_scheduler.add(player_id, table_id)
                 if self.data_storage.can_train(player_id):
                     batch = self.data_storage.get_batch(player_id)
                     batch_ref = ray.put(batch)
@@ -362,52 +326,33 @@ class CasinoManager:
                     # send them to play more games
                     self.table_scheduler.add(player_id, table_id)
 
-                # if self.num_samples[player_id] < self.batch_size:
-                #     self.scheduler_send_queue.put_nowait({
-                #         "player_id": player_id,
-                #         "table_id": table_id,
-                #     })
+            elif data["type"] == "termination":
+                table_id = data["table_id"]
+                print(f"Closing Table {table_id}")
+                # we get the table with that index
+                table_idx = self.table_ids.index(table_id)
+                table = self.tables.pop(table_idx)
+                self.table_ids.pop(table_idx)
+                ray.kill(table)
+
+            elif data["type"] == "creation":
+                # we find a suitable table id
+                table_id = 0
+                existing_table_ids = set(self.table_ids)
+                while table_id in existing_table_ids:
+                    table_id += 1
+                print(f"Creating Table {table_id}")
+                self.table_ids.append(table_id)
+                new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
+                                      self.table_max_size, self.discrete)
+                self.tables.append(new_table)
+                new_table.start.remote()
             else:
                 raise ValueError(f"Unknown message type {data['type']}")
 
-            return queue_empty, player_id
+            return queue_empty
         else:
-            return queue_empty, None
-
-    # def receive_from_data_storage_queue(self):
-    #     queue_empty = False
-    #     try:
-    #         data = self.data_storage_receive_queue.get_nowait()
-    #     except Empty:
-    #         # queue is empty, we continue with our loop
-    #         queue_empty = True
-    #         data = None
-    #
-    #     if not queue_empty:
-    #         player_id, batch_ref = data["player_id"], data["batch_ref"]
-    #
-    #         return queue_empty, player_id, batch_ref
-    #
-    #     return queue_empty, None, None
-
-    # def receive_from_scheduler_queue(self):
-    #     queue_empty = False
-    #     try:
-    #         data = self.scheduler_receive_queue.get_nowait()
-    #     except Empty:
-    #         # queue is empty, we continue with our loop
-    #         queue_empty = True
-    #         data = None
-    #
-    #     if not queue_empty:
-    #         player_ids, table_size = data["player_ids"], data["table_size"]
-    #         return queue_empty, player_ids, table_size
-    #
-    #     return queue_empty, None, None
-
-    # def save_player(self, player_id):
-    #     player: PlayerAI = ray.get(self.players[player_id])
-    #     torch.save(player.get_params(), os.path.join(self.player_save_folder, f"{player_id}.pt"))
+            return queue_empty
 
     def start_casino(self):
         print(f"Casino Starting")
@@ -463,28 +408,12 @@ class CasinoManager:
         while (not self.stop_event.is_set()):   # keep running the casino forever
             # casino main loop
             # Step 1: Receive from our trainer queue
-            queue_empty_1, _ = self.receive_from_trainer_queue()
+            queue_empty_1 = self.receive_from_trainer_queue()
 
             # Step 2: Receive from our table queue
-            queue_empty_2, _ = self.receive_from_table_queue()
+            queue_empty_2 = self.receive_from_table_queue()
 
-            # Step 3: Receive from our data storage queue to see if we can send anyone out for training
-            # queue_empty_3, player_id, batch_ref = self.receive_from_data_storage_queue()
-
-            # if not queue_empty_3:
-            #     # we send the player to the trainer
-            #     data = {
-            #         "type": "player",
-            #         "player_id": player_id,
-            #         "batch_ref": batch_ref,
-            #         "player_ref": self.players[player_id],
-            #         "player_training_count": self.player_training_counts[player_id]
-            #     }
-            #     self.trainer_send_queue.put_nowait(data)
-
-            # Step 4: Receive from the scheduler to see if we can spin up new tables
-            # queue_empty_4, player_ids, table_size = self.receive_from_scheduler_queue()
-            # if not queue_empty_4:
+            # Step 3: Receive from the scheduler to see if we can spin up new tables
             player_ids, table_size = self.table_scheduler.get_full_waiting_room()
             while player_ids is not None and table_size is not None:
                 # spin up a table
@@ -515,20 +444,10 @@ class CasinoManager:
 
                 player_ids, table_size = self.table_scheduler.get_full_waiting_room()
 
-            # if queue_empty_1 and queue_empty_2 and queue_empty_3 and queue_empty_4:
-            #     time.sleep(1e-3)  # micro-sleep as to not overload the cpu for nothing
-
         print("Casino cleaning up and shutting down...")
 
     def start(self):
         try:
-            # we need the casino thread seperate so the gui doesn't block it
-            # can't launch the gui inside the thread on Mac
-            # casino_thread = threading.Thread(target=self.start_casino, daemon=True)
-            # casino_thread.start()
-            # while True:
-            #     time.sleep(1)
-            # self._start_gui()
             self.start_casino()
         except KeyboardInterrupt as e:
             print("Casino terminated")
@@ -546,7 +465,7 @@ class CasinoManager:
                 })
 
             for table in self.tables:
-                ray.get(table)
+                ray.kill(table)
 
             # need to tell the trainers to terminate cleanly
             print(f"Telling the trainers to leave")
@@ -557,10 +476,11 @@ class CasinoManager:
                 })
 
             for trainer in self.trainers:
-                ray.get(trainer)
+                ray.kill(trainer)
 
             # need to tell the leaderboard gui to terminate
             print(f"Closing the leaderboard")
             self.leaderboard.set_done.remote()
-            # ray.get(self.leaderboard_gui)
+            ray.kill(self.leaderboard)
+
             time.sleep(5)  # giving time for everyone to close

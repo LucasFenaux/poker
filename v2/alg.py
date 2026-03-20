@@ -55,15 +55,16 @@ class PPO(OnPolicyAlgorithm):
                 "lr": 1e-4,
                 "value_lr": 5e-4,
                 "reward_normalization_scaler": 100,
-                "entropy_coef": 1e-8
+                "entropy_coef": 1e-8,
+                "grad_clip_norm": 0.5,
                 }
     key = "ppo"
     def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
-                 entropy_coef, discrete: bool = False):
+                 grad_clip_norm, entropy_coef, discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
         self.clip_threshold = clip_threshold
-        self.grad_norm_clip_threshold = 0.5
+        self.grad_clip_norm = grad_clip_norm
         self.target_kl = target_kl
         self.value_lr = value_lr
         network, value_network = self.init_networks(device, discrete)
@@ -140,30 +141,18 @@ class PPO(OnPolicyAlgorithm):
             normalized_sample_weights = sample_weights / sample_weights.mean()
             prob_sample_weights = sample_weights / sample_weights.sum()
 
-        old_network = copy.deepcopy(self.network)
-        old_network.requires_grad_(False)  # get a copy of the current network
-        dist_old = self.get_model_policy(old_network, states, batch_rnn_states)
-        logp_old = dist_old.log_prob(actions)
-        if not self.discrete:
-            logp_old = logp_old.sum(dim=-1)  # Our discrete models return both which action and the bet sizing
-
-        avg_loss = 0
-        count = 0
-        avg_v_loss = 0
-        avg_p_loss = 0
-        avg_e_loss = 0
-
         batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
-        # batch_rewards = normalize_rewards(batch_rewards, self.env_name)
 
-        # we then do multiple steps of SGD for the policy update
-        for i in range(self.sgd_steps):
-            # compute what we need
-            self.value_optimizer.zero_grad()
-            value_function = self.value_network(*states).squeeze()
-            # value_function = normalize_rewards(value_function, self.env_name)
-            # we scale down the predicted reward
-            value_function = value_function
+        # pre-compute what we need
+        with torch.no_grad():
+        # old_network = copy.deepcopy(self.network)
+        # old_network.requires_grad_(False)  # get a copy of the current network
+            dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
+            logp_old = dist_old.log_prob(actions)
+            if not self.discrete:
+                logp_old = logp_old.sum(dim=-1)  # Our discrete models return both which action and the bet sizing
+
+            value_function = self.value_network(*states).squeeze(-1)
 
             # we normalize after here because we need to preserve the sign of the advantage so we cannot mean/std batch normalize it as that might shift it
             advantages = batch_rewards - value_function.clone().detach()
@@ -178,16 +167,34 @@ class PPO(OnPolicyAlgorithm):
                 weighted_std = torch.sqrt(weighted_var + 1e-8)
                 advantages = (advantages - weighted_mean) / (weighted_std + 1e-8)
 
+        avg_loss = 0
+        count = 0
+        avg_v_loss = 0
+        avg_p_loss = 0
+        avg_e_loss = 0
+        # batch_rewards = normalize_rewards(batch_rewards, self.env_name)
+
+        # we then do multiple steps of SGD for the policy update
+        for i in range(self.sgd_steps):
+            # compute what we need
+            self.value_optimizer.zero_grad()
+            value_function = self.value_network(*states).squeeze(-1)
+            # value_function = normalize_rewards(value_function, self.env_name)
+            # we scale down the predicted reward
+            value_function = value_function
+
             # update the value network
             if sample_weights is None:
-                value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
+                # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
+                value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards)
             else:
-                value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards, reduction="none")
+                # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards, reduction="none")
+                value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards, reduction="none")
                 assert value_loss.dim() == normalized_sample_weights.dim()
                 value_loss = (value_loss * normalized_sample_weights).mean()
 
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_norm_clip_threshold)
+            torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_clip_norm)
 
             self.value_optimizer.step()
 
@@ -204,8 +211,12 @@ class PPO(OnPolicyAlgorithm):
                 logp = logp.sum(dim=-1)
                 entropy = entropy.sum(dim=-1)  # Sum entropy across action dimensions for continuous spaces
 
-            approx_kl = logp_old - logp  # openai early_stop check
-            if approx_kl.mean().item() > 1.5 * self.target_kl:
+            with torch.no_grad():
+                logratio = logp - logp_old
+                ratio = torch.exp(logratio)
+                approx_kl = ((ratio - 1) - logratio).mean()
+
+            if approx_kl.item() > 1.5 * self.target_kl:
                 break
             ratio = torch.exp(logp - logp_old)
             # compute the sign-dependent advantage coefficient
@@ -226,7 +237,7 @@ class PPO(OnPolicyAlgorithm):
             loss = policy_loss - (self.entropy_coef * entropy_loss)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_norm_clip_threshold)
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
 
             self.optimizer.step()
             avg_v_loss += value_loss.item()

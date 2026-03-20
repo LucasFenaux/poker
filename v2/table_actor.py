@@ -39,7 +39,7 @@ class TableActor:
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
         self.replay = 1
-        self.tree_expansion = 3
+        self.tree_expansion = 5
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
@@ -448,8 +448,14 @@ class TableActor:
 
             if data is not None:
                 if data["type"] == "message":
-                    terminate = data.get("terminate", True)  # by default we assume that we need to terminate in case of a malformed message
+                    terminate = data.get("terminate", False)  # by default we assume that we do not need to terminate in case of a malformed message
                     if terminate:
+                        # we need to send a message to the manager to alert him that we are terminating
+                        message = {
+                            "type": "termination",
+                            "table_id": self.table_id,
+                        }
+                        self.out_queue.put(message)
                         return True
 
                 # otherwise, we are good to go
