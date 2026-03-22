@@ -53,16 +53,21 @@ class LeaderboardActor:
             try:
                 # Use block=False and an await so we don't freeze the actor!
                 # This allows the GUI's .remote() calls to be processed.
-                data = await asyncio.wait_for(self.queue.get_async(), timeout=1.0)
+                # data = await asyncio.wait_for(self.queue.get_async(), timeout=1.0)
+                data = self.queue.get_nowait()
 
                 if data is not None:
+                    # print("updating")
                     player_id, player_winnings, num_tables, num_trainers = data
                     self.num_tables = num_tables
                     self.num_trainers = num_trainers
                     self.update(player_id, player_winnings)
 
-            except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!
-                continue
+                await asyncio.sleep(0)
+            # except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!
+            #     continue
+            except Empty:
+                await asyncio.sleep(0.05)
 
         # Use asyncio.sleep instead of time.sleep in an async method
         await asyncio.sleep(10)

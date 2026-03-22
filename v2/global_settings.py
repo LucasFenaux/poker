@@ -8,9 +8,9 @@ import os
 
 NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
 NUM_GPUS=0
-NUM_PLAYERS=100
-NUM_TABLES=10
-NUM_TRAINERS=5
+NUM_PLAYERS=10
+NUM_TABLES=3
+NUM_TRAINERS=1
 
 
 

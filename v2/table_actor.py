@@ -1,5 +1,5 @@
 import copy
-
+from collections import deque
 import pokerkit
 import ray
 from ray.util.queue import Queue, Empty
@@ -39,7 +39,8 @@ class TableActor:
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
         self.replay = 1
-        self.tree_expansion = 5
+        self.tree_expansion = 5   # since most games last longer than 40 hands, if we use 5 then we throw away a ton of data
+        # for 3, we start throwing hands away 185 hands played if every player plays every street
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
@@ -151,11 +152,17 @@ class TableActor:
             else:
                 raise RuntimeError("No legal fallback from CHECK_OR_CALL")
         elif interpreted_action == Action.RAISE:
-            # we want to raise, we use the bet_sizing provided
-            if state.can_complete_bet_or_raise_to(bet_sizing):
-                state.complete_bet_or_raise_to(bet_sizing)
+            # If the bet is invalid, force it into legal bounds
+            legal_min = state.min_completion_betting_or_raising_to_amount
+            legal_max = state.max_completion_betting_or_raising_to_amount
+
+            # If they can legally raise, clamp their bet to the legal window
+            if legal_min is not None and legal_max is not None:
+                # Snap the sizing to valid boundaries
+                clamped_bet = max(legal_min, min(bet_sizing, legal_max))
+                state.complete_bet_or_raise_to(clamped_bet)
             elif state.can_check_or_call():
-                state.check_or_call()
+                state.check_or_call()  # Legitimate fallback (e.g. facing an all-in)
             elif state.can_fold():
                 state.fold()
             else:
@@ -223,7 +230,12 @@ class TableActor:
         # we create the children
         # children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion)]
         level_rewards = {player_id: 0 for player_id in self.game_player_ids}
-        for child_state in children_states:
+        for i, child_state in enumerate(children_states):
+            # we need to shuffle the deck to make sure its different from the main deck
+            if i != 0 :  # we can save a shuffle
+                cards_list = list(child_state.deck_cards)
+                random.shuffle(cards_list)
+                child_state.deck_cards = deque(cards_list)
             # deal the board cards to make the street index move forward
             child_state.deal_board()
             (child_snapshots, child_current_actors, child_player_actions, child_sample_weights, child_rewards,
@@ -302,16 +314,19 @@ class TableActor:
 
                 self.game_params["player_count"] = len(self.game_player_ids)
 
-            # update the player game stacks
             self.game_starting_stacks = final_game_stacks
+
+            # Keep track of if the current button busted
+            button_busted = (0 in busted_out)
 
             if self.game_params["player_count"] < 2:
                 return True
 
-            # rotate the spots
-            self.game_players.append(self.game_players.pop(0))
-            self.game_player_ids.append(self.game_player_ids.pop(0))
-            self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
+            if not button_busted:
+                # rotate the spots
+                self.game_players.append(self.game_players.pop(0))
+                self.game_player_ids.append(self.game_player_ids.pop(0))
+                self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
 
             return False
         except Exception as e:
@@ -423,8 +438,8 @@ class TableActor:
 
                 self._reset_current_hand()
                 counter += 1
-            if counter % 100 == 0:
-                print(counter)
+                # if counter % 100 == 0:
+            # print(self.table_id, self.num_games_played+1, counter)
             # need to save the remaining player's winnings
             # update player winnings
             for i, player_id in enumerate(self.game_player_ids):
@@ -492,10 +507,11 @@ class TableActor:
 
                 batch = []
                 # ---> NEW: Send the batched data exactly once per session
+                num_samples = []
                 for pid in player_ids:
                     p_index = player_ids.index(pid)
                     p_version = self.current_player_versions[p_index]
-
+                    num_samples.append(len(session_hand_info[pid]["states"]))
                     batch.append({
                         "type": "data",
                         "table_id": self.table_id,
@@ -505,7 +521,7 @@ class TableActor:
                         "num_samples": len(session_hand_info[pid]["states"]),
                         "version": p_version
                     })
-
+                # print(self.table_id, self.num_games_played, num_samples)
                 # now we send back the players
                 for player_id in player_ids:
                     batch.append({

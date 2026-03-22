@@ -37,11 +37,14 @@ class ActionInterpreter(nn.Module):
         assert len(x.shape) <= 2
 
         def bet_size_scaling(bet):
-            if bet < 0:
-                # we assume it's a min_bet
-                return min_bet
+            normalized_multiplier = (bet + 1.0) / 2.0
 
-            return to_exact_fraction(bet * (max_bet - min_bet) + min_bet)
+            return to_exact_fraction(normalized_multiplier * (max_bet - min_bet) + min_bet)
+            # if bet < 0:
+            #     # we assume it's a min_bet
+            #     return min_bet
+            #
+            # return to_exact_fraction(bet * (max_bet - min_bet) + min_bet)
 
         # we squash both the action and the bet sizing and use the bet sizing as the slider between min and max bet
 

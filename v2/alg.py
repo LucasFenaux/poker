@@ -54,8 +54,8 @@ class PPO(OnPolicyAlgorithm):
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
                 "value_lr": 5e-4,
-                "reward_normalization_scaler": 100,
-                "entropy_coef": 1e-8,
+                "reward_normalization_scaler": 1,
+                "entropy_coef": 1e-2,
                 "grad_clip_norm": 0.5,
                 }
     key = "ppo"
@@ -141,7 +141,7 @@ class PPO(OnPolicyAlgorithm):
             normalized_sample_weights = sample_weights / sample_weights.mean()
             prob_sample_weights = sample_weights / sample_weights.sum()
 
-        batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
+        # batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
 
         # pre-compute what we need
         with torch.no_grad():
