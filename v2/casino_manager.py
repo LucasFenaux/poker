@@ -173,10 +173,10 @@ class CasinoManager:
         self.player_save_folder = os.path.join(save_folder, "players")
         os.makedirs(self.player_save_folder, exist_ok=True)
         self.log_folder = os.path.join(save_folder, "logs")
-
+        self.mode = "beta"
         self.is_playing = {player_id: False for player_id in self.player_ids}
         # we spin up the player models
-        self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete))) for _ in
+        self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                         self.player_ids]
         self.player_training_counts = [0] * len(self.player_ids)
 
@@ -198,7 +198,7 @@ class CasinoManager:
               f"{self.table_max_size}...")
         self.table_ids = [table_id for table_id in range(NUM_TABLES)]
         self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
-                                         self.table_max_size, discrete) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+                                         self.table_max_size, discrete, self.mode) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
         for table in self.tables:
             table.start.remote()
 
@@ -206,7 +206,7 @@ class CasinoManager:
 
         self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
         self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
-                                             self.log_folder, self.player_save_folder)
+                                             self.log_folder, self.player_save_folder, self.mode)
                          for i in self.trainer_ids]
         for trainer in self.trainers:
             trainer.start.remote()
@@ -275,7 +275,7 @@ class CasinoManager:
                 print(f"Creating Trainer {trainer_id}")
                 self.trainer_ids.append(trainer_id)
                 new_trainer = TrainerActor.remote(trainer_id, self.trainer_send_queue, self.trainer_receive_queue, self.device,
-                                    self.discrete, self.log_folder, self.player_save_folder)
+                                    self.discrete, self.log_folder, self.player_save_folder, self.mode)
                 self.trainers.append(new_trainer)
                 new_trainer.start.remote()
 
@@ -344,7 +344,7 @@ class CasinoManager:
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
                 new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
-                                      self.table_max_size, self.discrete)
+                                      self.table_max_size, self.discrete, self.mode)
                 self.tables.append(new_table)
                 new_table.start.remote()
             else:

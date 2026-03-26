@@ -48,8 +48,8 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 
 class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
-                # "sgd_steps": 80,  # openai implementation
-                "sgd_steps": 5,
+                "sgd_steps": 80,  # openai implementation
+                # "sgd_steps": 5,
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
@@ -60,14 +60,15 @@ class PPO(OnPolicyAlgorithm):
                 }
     key = "ppo"
     def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
-                 grad_clip_norm, entropy_coef, discrete: bool = False):
+                 grad_clip_norm, entropy_coef, mode, discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
         self.clip_threshold = clip_threshold
         self.grad_clip_norm = grad_clip_norm
         self.target_kl = target_kl
         self.value_lr = value_lr
-        network, value_network = self.init_networks(device, discrete)
+        network, value_network = self.init_networks(device, discrete, mode)
+        self.mode = mode
         self.network = network
         self.value_network = value_network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
@@ -77,8 +78,8 @@ class PPO(OnPolicyAlgorithm):
         self.entropy_coef = entropy_coef
 
     @staticmethod
-    def init_networks(device, discrete):
-        network = load_dummy_model(device, discrete)
+    def init_networks(device, discrete, mode):
+        network = load_dummy_model(device, discrete, mode)
         value_network = get_value_model(device)
         return network, value_network
 
@@ -250,12 +251,24 @@ class PPO(OnPolicyAlgorithm):
             value_loss = avg_v_loss / count
             policy_loss = avg_p_loss / count
             entropy_loss = avg_e_loss / count
+
         else:
             loss = avg_loss
             value_loss = avg_v_loss
             policy_loss = avg_p_loss
             entropy_loss = avg_e_loss
-        return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss}
+
+        # compute a histogram
+        with torch.no_grad():
+            dist = self.get_model_policy(self.network, states, batch_rnn_states)
+            samples = dist.sample((1000,))[:, :, 0]
+            if self.mode == "normal":
+                samples = torch.tanh(samples)
+
+        # Log the actual distribution shape to TensorBoard
+
+        return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
+                "action_hist": samples}
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)

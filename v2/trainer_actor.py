@@ -10,11 +10,12 @@ from alg import PPO
 @ray.remote(num_cpus=1)
 class TrainerActor:
     def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
-                 player_save_folder: str) -> None:
+                 player_save_folder: str, mode: str) -> None:
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue
-        self.models = PPO.init_networks(device, discrete)
+        self.mode = mode
+        self.models = PPO.init_networks(device, discrete, mode)
         self.device = device
         self.discrete = discrete
         self.num_training_ran = 0
@@ -28,7 +29,7 @@ class TrainerActor:
 
     def run(self, player_id, player_state_dicts, data_batch, player_training_count: int):
         try:
-            alg = PPO(device=self.device, discrete=self.discrete, **PPO.default_hyperparameters)
+            alg = PPO(device=self.device, mode=self.mode, discrete=self.discrete, **PPO.default_hyperparameters)
             alg.load_params(player_state_dicts)
             # run the model update
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
@@ -44,7 +45,7 @@ class TrainerActor:
             self.writer.add_scalar(f"Player_{player_id}/Value_Loss", metrics["value_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Loss", metrics["loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
-
+            self.writer.add_histogram(f"Player_{player_id}/Action_Dist", metrics["action_hist"], player_training_count)
             # send the updated model params back to the manager
             new_weights = alg.get_params()
             message = {

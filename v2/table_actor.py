@@ -25,14 +25,15 @@ class TableActor:
         "mode": "tree"
     }
 
-    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool):
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool, model_mode: str):
         self.table_id = table_id
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.device = device
         self.discrete = discrete
         self.max_table_size = max_table_size
-        self.action_interpreter: ActionInterpreter = ActionInterpreter()
+        self.action_interpreter: ActionInterpreter = ActionInterpreter(model_mode)
+        self.model_mode = model_mode
         self.num_games_played = 0
         # number of games to play
         # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
@@ -45,7 +46,7 @@ class TableActor:
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
         self.game_player_ids = None   # game state facing view
-        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete), self.discrete)
+        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
                         for _ in range(max_table_size)]
         self.game_players = self.players[:]
         self.params = None
@@ -66,7 +67,7 @@ class TableActor:
 
         self.player_winnings = {player_id: 0.0 for player_id in self.player_ids}
 
-        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete), self.discrete)
+        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
                         for _ in range(len(player_ids))]
         self.game_players = self.players[:]
 
@@ -135,6 +136,8 @@ class TableActor:
             max_bet = min_bet  # Or some other logical fallback
 
         interpreted_action, bet_sizing = self.action_interpreter(player_action, min_bet, max_bet)
+        if self.num_games_played < 1:
+            print(player_action[0].item(), interpreted_action)
 
         if interpreted_action == Action.CHECK_OR_FOLD:
             if state.can_check_or_call() and state.checking_or_calling_amount == 0:

@@ -2,6 +2,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
+from torch.distributions.beta import Beta
 import torch.nn.functional as F
 import pokerkit
 
@@ -12,33 +13,51 @@ LOG_STD_MAX = 2.0
 
 
 class PokerModel(nn.Module):
-    def __init__(self, interpreter: StateInterpreter, deterministic: bool):
+    def __init__(self, interpreter: StateInterpreter, deterministic: bool, mode: str):
         super(PokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
-
+        self.mode = mode
         self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 64), nn.GELU(),
                                     nn.Linear(64, 16), nn.GELU())
-
-        # one dim for which action and one dim for bet sizing
-        self.mu_net = nn.Linear(16, 2)
-        if not deterministic:
-            self.log_std_net = nn.Linear(16, 2)
-        else:
-            self.log_std_net = None
         self.deterministic = deterministic
 
-    def _forward(self, feature_vector: torch.Tensor):
+        self.mu_net = None
+        self.std_net = None
+        self.alpha_net = None
+        self.beta_net = None
+        if self.mode == "normal":
+            # one dim for which action and one dim for bet sizing
+            self.mu_net = nn.Linear(16, 2)
+            if not deterministic:
+                self.std_net = nn.Linear(16, 2)
+        elif self.mode == "beta":
+            self.alpha_net = nn.Linear(16, 2)
+            if not self.deterministic:
+                self.beta_net = nn.Linear(16, 2)
+        else:
+            raise NotImplementedError(self.mode)
+
+    def _forward_beta(self, feature_vector: torch.Tensor):
+        if self.deterministic:
+            return self.alpha_net(self.embed_net(feature_vector))
+        else:
+            feature_embedding = self.embed_net(feature_vector)
+
+            alpha = F.softplus(self.alpha_net(feature_embedding)) + 1e-5
+            beta = F.softplus(self.beta_net(feature_embedding)) + 1e-5
+
+            dist = Beta(alpha, beta)
+            return dist
+
+    def _forward_normal(self, feature_vector: torch.Tensor):
         if self.deterministic:
             return self.mu_net(self.embed_net(feature_vector))
         else:
             feature_embedding = self.embed_net(feature_vector)
             mu = self.mu_net(feature_embedding)
-            # log_std = self.log_std_net(feature_embedding)
-            # log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-            # std = torch.exp(log_std)
             # treat it as straight std
-            std = F.softplus(self.log_std_net(feature_embedding)) + 1e-5
+            std = F.softplus(self.std_net(feature_embedding)) + 1e-5
 
             dist = Normal(mu, std)
             return dist
@@ -54,7 +73,12 @@ class PokerModel(nn.Module):
         else:
             raise NotImplementedError
 
-        return self._forward(feature_vector)
+        if self.mode == "normal":
+            return self._forward_normal(feature_vector)
+        elif self.mode == "beta":
+            return self._forward_beta(feature_vector)
+        else:
+            raise NotImplementedError
 
 
 class ValueModel(nn.Module):
@@ -90,14 +114,14 @@ def get_value_model(device: torch.device) -> ValueModel:
     return ValueModel(interpreter).to(device)
 
 
-def load_model(player_id, device, deterministic=False) -> PokerModel:
+def load_model(player_id, device, deterministic=False, mode="beta") -> PokerModel:
     # TODO: implement saving/loading of player models
     interpreter = StateInterpreter(device).to(device)
-    model  = PokerModel(interpreter, deterministic).to(device)
+    model  = PokerModel(interpreter, deterministic, mode).to(device)
     return model
 
 
-def load_dummy_model(device, deterministic=False) -> PokerModel:
+def load_dummy_model(device, deterministic=False, mode="beta") -> PokerModel:
     interpreter = StateInterpreter(device).to(device)
-    model  = PokerModel(interpreter, deterministic).to(device)
+    model  = PokerModel(interpreter, deterministic, mode).to(device)
     return model
