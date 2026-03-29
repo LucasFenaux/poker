@@ -262,13 +262,21 @@ class PPO(OnPolicyAlgorithm):
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
             samples = dist.sample((1000,))[:, :, 0]
+
+            alpha_tensor = None
+            beta_tensor = None
             if self.mode == "normal":
                 samples = torch.tanh(samples)
+            elif self.mode == "beta":
+                dist: torch.distributions.Beta
+                alpha_tensor = dist.concentration1
+                beta_tensor = dist.concentration0
+
 
         # Log the actual distribution shape to TensorBoard
 
         return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
-                "action_hist": samples}
+                "action_hist": samples, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor}
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)

@@ -202,7 +202,7 @@ class TableActor:
                     player_action_tensor = player.get_action((snapshot, current_actor))
                     player_action = player_action_tensor.detach().cpu()
             except Exception as e:
-                print(state)
+                # print(state)
                 raise e
 
             # we log the state and action for player training
@@ -527,9 +527,11 @@ class TableActor:
                 # print(self.table_id, self.num_games_played, num_samples)
                 # now we send back the players
                 for player_id in player_ids:
+                    other_players = [(pid, self.current_player_versions[player_ids.index(pid)]) for pid in player_ids if player_id != pid]
                     batch.append({
                         "type": "player",
                         "table_id": self.table_id,
-                        "player_id": player_id
+                        "player_id": player_id,
+                        "other_players": other_players
                     })
                 self.out_queue.put_nowait_batch(batch)

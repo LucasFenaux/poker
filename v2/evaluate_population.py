@@ -162,7 +162,7 @@ def evaluate_population(num_games, run_folder, max_table_size):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate an entire population of trained Poker AIs.")
-    parser.add_argument("--games", type=int, default=5000, help="Number of hands to play PER MODEL (default: 200)")
+    parser.add_argument("--games", type=int, default=200, help="Number of hands to play PER MODEL (default: 200)")
     parser.add_argument("--run_folder", type=str, default=None, help="Path to the specific run folder")
     parser.add_argument("--max_table_size", type=int, default=2,
                         help="Maximum number of players at the table (default: 2)")

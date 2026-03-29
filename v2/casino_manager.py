@@ -7,12 +7,14 @@ import ray
 from ray.util.queue import Queue, Empty
 import os
 import torch
+import numpy as np
 
-from global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS
+from global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE
 from alg import PPO
 from trainer_actor import TrainerActor
 from table_actor import TableActor
 from leaderboard_actor import LeaderboardActor
+import math
 
 
 class PlayerAI:
@@ -96,72 +98,199 @@ class DataStorage:
         }
 
 # @ray.remote(num_cpus=0)
-class TableScheduler:
-    # def __init__(self, in_queue, out_queue, table_min_size: int, table_max_size: int, player_ids):
+# class TableScheduler:
+#     # def __init__(self, in_queue, out_queue, table_min_size: int, table_max_size: int, player_ids):
+#     def __init__(self, table_min_size: int, table_max_size: int, player_ids):
+#         # self.in_queue = in_queue
+#         # self.out_queue = out_queue
+#         self.player_ids = player_ids
+#         self.table_max_size = table_max_size
+#         self.table_min_size = table_min_size
+#         self.waiting_rooms = [[] for _ in range(NUM_PLAYERS//table_min_size + int(NUM_PLAYERS%table_min_size > 0))]
+#         print(f"Created {len(self.waiting_rooms)} waiting rooms")
+#         self.next_table_size = [random.randint(table_min_size, table_max_size)] * len(self.waiting_rooms)
+#         self.last_table_played_at: dict[int, int] = {player_id: None for player_id in player_ids}
+#         # TODO: implement a new way to do the waiting room so I don't have only table max size ** 2 players playing
+#
+#     def all_waiting_rooms_are_full(self):
+#         for waiting_room, next_table_size in zip(self.waiting_rooms, self.next_table_size):
+#             if len(waiting_room) < next_table_size:
+#                 return False
+#         return True
+#
+#     def add(self, player_id: int, table_id: int = None):
+#         # if table_id is None, came back from training so no need to update the last table played at
+#         if table_id is not None:
+#             self.last_table_played_at[player_id] = table_id
+#
+#         if self.all_waiting_rooms_are_full():
+#             # tell the casino to start more tables before trying to add back players into the waiting rooms
+#             return False
+#
+#         table_id = self.last_table_played_at[player_id]
+#         # find which waiting room to put them in
+#         added_to_a_table = False
+#         for i, waiting_room in enumerate(self.waiting_rooms):
+#             found_same_table_player = False
+#             for other_player_id in waiting_room:
+#                 if self.last_table_played_at[other_player_id] == table_id:
+#                     found_same_table_player = True
+#                     break
+#             if not found_same_table_player and len(waiting_room) < self.next_table_size[i]:
+#                 # we can add them to the waiting room
+#                 waiting_room.append(player_id)
+#                 added_to_a_table = True
+#                 break
+#
+#         if not added_to_a_table:
+#             # we just add them to a non-full table for now
+#             # TODO: do something better than that. Might require a scheduler overhaul
+#             for i, waiting_room in enumerate(self.waiting_rooms):
+#                 if len(waiting_room) < self.next_table_size[i]:
+#                     waiting_room.append(player_id)
+#                     break
+#         return True
+#
+#     def get_full_waiting_room(self):
+#         for i, (waiting_room, next_table_size) in enumerate(zip(self.waiting_rooms, self.next_table_size)):
+#             if len(waiting_room) > next_table_size:
+#                 raise Exception("WTF HAPPENED HERE")
+#             elif len(waiting_room) == next_table_size:
+#                 player_ids = self.waiting_rooms.pop(i)
+#                 table_size = self.next_table_size.pop(i)
+#
+#                 self.waiting_rooms.append([])
+#                 self.next_table_size.append(random.randint(self.table_min_size, self.table_max_size))
+#                 return player_ids, table_size
+#
+#         return None, None
+
+
+class NewTableScheduler:
     def __init__(self, table_min_size: int, table_max_size: int, player_ids):
-        # self.in_queue = in_queue
-        # self.out_queue = out_queue
         self.player_ids = player_ids
         self.table_max_size = table_max_size
         self.table_min_size = table_min_size
-        self.waiting_rooms = [[] for _ in range(NUM_PLAYERS//table_min_size + int(NUM_PLAYERS%table_min_size > 0))]
-        print(f"Created {len(self.waiting_rooms)} waiting rooms")
-        self.next_table_size = [random.randint(table_min_size, table_max_size)] * len(self.waiting_rooms)
-        self.last_table_played_at: dict[int, int] = {player_id: None for player_id in player_ids}
-        # TODO: implement a new way to do the waiting room so I don't have only table max size ** 2 players playing
+        assert table_max_size <= MAX_TABLE_SIZE
+        assert self.table_min_size <= self.table_max_size
+        self.max_plans = 10
+        self.plan_count = 0
+        self.weights = {
+            player_id: {
+                other_player_id: 0 for other_player_id in player_ids if player_id != other_player_id
+            } for player_id in player_ids
+        }
+        self.pool = set(self.player_ids[:])
+        self.plans: list[list[set]] = []
+        self.was_updated = False
+        self.already_returned_none = False
 
-    def all_waiting_rooms_are_full(self):
-        for waiting_room, next_table_size in zip(self.waiting_rooms, self.next_table_size):
-            if len(waiting_room) < next_table_size:
-                return False
-        return True
+    def _generate_plan(self):
+        """
+        We generate a partition of the all the players into tables based on their mutual weights at time of generation.
+        :return: a plan, which is a list of disjoint sets such that the union of all those sets is self.player_ids
+        """
+        available_players = self.player_ids[:]
+        plan = []
+        while len(available_players) >= self.table_min_size:  # we accept that some players might not get to play a plan
+            table = []
+            # we pick a random table size
+            if len(available_players) < self.table_max_size:
+                table_size = len(available_players)
+            else:
+                table_size = random.randint(self.table_min_size, self.table_max_size)
+                if len(available_players) - table_size < self.table_min_size:
+                    table_size = self.table_min_size
 
-    def add(self, player_id: int, table_id: int = None):
-        # if table_id is None, came back from training so no need to update the last table played at
-        if table_id is not None:
-            self.last_table_played_at[player_id] = table_id
+            # we then pick a random player as the starter of the table
+            starter_idx = random.randint(0, len(available_players)-1)
+            starter = available_players.pop(starter_idx)
+            table.append(starter)
 
-        if self.all_waiting_rooms_are_full():
-            # tell the casino to start more tables before trying to add back players into the waiting rooms
-            return False
+            starter_weights = self.weights[starter]
+            available_player_weights = []
+            # we then get the weights of the starter and pick from the remaining players based on those weights
+            for remaining_player in available_players:
+                available_player_weights.append(starter_weights[remaining_player])
 
-        table_id = self.last_table_played_at[player_id]
-        # find which waiting room to put them in
-        added_to_a_table = False
-        for i, waiting_room in enumerate(self.waiting_rooms):
-            found_same_table_player = False
-            for other_player_id in waiting_room:
-                if self.last_table_played_at[other_player_id] == table_id:
-                    found_same_table_player = True
-                    break
-            if not found_same_table_player and len(waiting_room) < self.next_table_size[i]:
-                # we can add them to the waiting room
-                waiting_room.append(player_id)
-                added_to_a_table = True
-                break
+            # we invert them
+            max_weight = max(available_player_weights)
+            inverted_weights = [max_weight - remaining_player_weight + 1 for remaining_player_weight in available_player_weights]
 
-        if not added_to_a_table:
-            # we just add them to a non-full table for now
-            # TODO: do something better than that. Might require a scheduler overhaul
-            for i, waiting_room in enumerate(self.waiting_rooms):
-                if len(waiting_room) < self.next_table_size[i]:
-                    waiting_room.append(player_id)
-                    break
-        return True
+            # then we normalize them
+            normalized_player_weights = [inverted_weight / sum(inverted_weights) for
+                                        inverted_weight in inverted_weights]
 
-    def get_full_waiting_room(self):
-        for i, (waiting_room, next_table_size) in enumerate(zip(self.waiting_rooms, self.next_table_size)):
-            if len(waiting_room) > next_table_size:
-                raise Exception("WTF HAPPENED HERE")
-            elif len(waiting_room) == next_table_size:
-                player_ids = self.waiting_rooms.pop(i)
-                table_size = self.next_table_size.pop(i)
+            assert math.isclose(sum(normalized_player_weights), 1.0, rel_tol=1e-5)
 
-                self.waiting_rooms.append([])
-                self.next_table_size.append(random.randint(self.table_min_size, self.table_max_size))
-                return player_ids, table_size
+            # select the followers based on their weight
+            followers = np.random.choice(available_players, p=normalized_player_weights, replace=False, size=table_size-1)
 
-        return None, None
+            for follower in followers:
+                follower = follower.item()
+                available_players.remove(follower)
+                table.append(follower)
+
+            plan.append(set(table))
+        return plan
+
+    def add(self, player_id: int, other_players: list[tuple[int, int]] = None):
+        """
+        Add a player into the scheduler to be scheduled for a game
+        :param player_id: Which player we are adding back in.
+        :param other_players:  The other players the player was playing with if he was a table and their current version
+        :return:
+        """
+        assert player_id not in self.pool, print(f"Player duplicated - {player_id} is already in the pool")
+        if other_players is not None:
+            # add the player version to the player weights
+            player_weights = self.weights[player_id]
+            for other_player, other_player_version in other_players:
+                player_weights[other_player] += other_player_version
+        self.pool.add(player_id)
+        self.was_updated = True
+
+    def get_table(self):
+        if not self.was_updated and self.already_returned_none:
+            # we have not changed since last query and we already verified that no table is available, we lazily return
+            return None
+
+        # we get the current plan and check if a table is available with the players in the pool
+        for i, plan in enumerate(self.plans):
+            for j, potential_table in enumerate(plan):
+                potential_table: set
+                # we check if it is a possible table
+                if potential_table.issubset(self.pool):
+                    # we found a suitable table
+                    table = plan.pop(j)
+                    if len(plan) == 0:
+                        self.plans.pop(i)  # we remove the empty list
+                    # we update the pool
+                    for player in table:
+                        self.pool.remove(player)
+
+                    self.was_updated = True
+                    self.already_returned_none = False
+                    return list(table)
+
+        # if we got here, it means no suitable table was found
+        # we first check if we already have too many plans
+        if len(self.plans) >= self.max_plans:
+            # too many plans, can't generate a new one, we wait until players catch up to move forward
+            self.already_returned_none = True
+            return None
+
+        # we still have room to create a new plan
+        new_plan = self._generate_plan()
+        print(f"Newest plan ({self.plan_count}): {new_plan} | {len(self.plans)}")
+        self.plan_count += 1
+        self.plans.append(new_plan)
+        self.was_updated = True
+
+        # we try to find a table again
+        table = self.get_table()
+        self.already_returned_none = table is None
+        return table
 
 
 class CasinoManager:
@@ -185,7 +314,8 @@ class CasinoManager:
         self.batch_size = 5000
         self.on_policy = True
 
-        self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+        # self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+        self.table_scheduler = NewTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
         self.table_send_queue = Queue(maxsize=0)
         self.table_receive_queue = Queue(maxsize=0)
@@ -307,7 +437,7 @@ class CasinoManager:
                 self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids)))
 
             elif data["type"] == "player":
-                player_id, table_id = data["player_id"], data["table_id"]
+                player_id, other_players = data["player_id"], data["other_players"]
 
                 self.is_playing[player_id] = False  # Mark them as free!
                 if self.data_storage.can_train(player_id):
@@ -324,7 +454,7 @@ class CasinoManager:
                     self.trainer_send_queue.put_nowait(trainer_data)
                 else:
                     # send them to play more games
-                    self.table_scheduler.add(player_id, table_id)
+                    self.table_scheduler.add(player_id, other_players)
 
             elif data["type"] == "termination":
                 table_id = data["table_id"]
@@ -357,53 +487,55 @@ class CasinoManager:
     def start_casino(self):
         print(f"Casino Starting")
         # initialize the casino by putting all the players into the table queue
-        players_left = [player_id for player_id in self.player_ids]
-        num_players_left = len(players_left)
-        while num_players_left > 0:
-            if num_players_left <= self.table_max_size:
-                # last table, we start it and move on
-                table_size = num_players_left
-                last_table = True
-            else:
-                table_size = random.randint(self.table_min_size, self.table_max_size)
-                if num_players_left - table_size < self.table_min_size:
-                    table_size = num_players_left - self.table_min_size
-                last_table = False
-            # print(num_players_left)
-            # pick the players
-            if last_table:
-                player_ids = players_left
-            else:
-                player_ids = random.sample(players_left, table_size)
+        # no need to put players in the table queue, the new table scheduler will spin up games as we query it
 
-            # update the players left
-            players_left = [player for player in players_left if player not in player_ids]
-            num_players_left = len(players_left)
-
-            small_blind = 1  # we only deal with relative values anyways
-            big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-            # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
-            bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-            starting_stacks = bb_starting_stacks * big_blind
-            table_params = {
-                "raw_blinds_or_straddles": (small_blind, big_blind),
-                "min_bet": big_blind,
-                "raw_starting_stacks": starting_stacks,
-                "player_count": table_size
-            }
-
-            # gather the player's parameters and send it all
-            data = {
-                "type": "players",
-                "player_ids": player_ids,
-                "player_refs": [self.players[player_id] for player_id in player_ids],
-                "player_versions": [self.player_training_counts[p_id] for p_id in player_ids],
-                "table_params": table_params
-            }
-            self.table_send_queue.put_nowait(data)
-            # update the player statuses
-            for p_id in player_ids:
-                self.is_playing[p_id] = True
+        # players_left = [player_id for player_id in self.player_ids]
+        # num_players_left = len(players_left)
+        # while num_players_left > 0:
+        #     if num_players_left <= self.table_max_size:
+        #         # last table, we start it and move on
+        #         table_size = num_players_left
+        #         last_table = True
+        #     else:
+        #         table_size = random.randint(self.table_min_size, self.table_max_size)
+        #         if num_players_left - table_size < self.table_min_size:
+        #             table_size = num_players_left - self.table_min_size
+        #         last_table = False
+        #     # print(num_players_left)
+        #     # pick the players
+        #     if last_table:
+        #         player_ids = players_left
+        #     else:
+        #         player_ids = random.sample(players_left, table_size)
+        #
+        #     # update the players left
+        #     players_left = [player for player in players_left if player not in player_ids]
+        #     num_players_left = len(players_left)
+        #
+        #     small_blind = 1  # we only deal with relative values anyways
+        #     big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
+        #     # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
+        #     bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
+        #     starting_stacks = bb_starting_stacks * big_blind
+        #     table_params = {
+        #         "raw_blinds_or_straddles": (small_blind, big_blind),
+        #         "min_bet": big_blind,
+        #         "raw_starting_stacks": starting_stacks,
+        #         "player_count": table_size
+        #     }
+        #
+        #     # gather the player's parameters and send it all
+        #     data = {
+        #         "type": "players",
+        #         "player_ids": player_ids,
+        #         "player_refs": [self.players[player_id] for player_id in player_ids],
+        #         "player_versions": [self.player_training_counts[p_id] for p_id in player_ids],
+        #         "table_params": table_params
+        #     }
+        #     self.table_send_queue.put_nowait(data)
+        #     # update the player statuses
+        #     for p_id in player_ids:
+        #         self.is_playing[p_id] = True
 
         while (not self.stop_event.is_set()):   # keep running the casino forever
             # casino main loop
@@ -414,8 +546,10 @@ class CasinoManager:
             queue_empty_2 = self.receive_from_table_queue()
 
             # Step 3: Receive from the scheduler to see if we can spin up new tables
-            player_ids, table_size = self.table_scheduler.get_full_waiting_room()
-            while player_ids is not None and table_size is not None:
+            # player_ids, table_size = self.table_scheduler.get_full_waiting_room()
+            player_ids = self.table_scheduler.get_table()
+            while player_ids is not None:
+                table_size = len(list(player_ids))
                 # spin up a table
                 small_blind = 1
                 big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
@@ -442,7 +576,7 @@ class CasinoManager:
                 for p_id in player_ids:
                     self.is_playing[p_id] = True
 
-                player_ids, table_size = self.table_scheduler.get_full_waiting_room()
+                player_ids = self.table_scheduler.get_table()
 
         print("Casino cleaning up and shutting down...")
 

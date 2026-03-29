@@ -8,6 +8,7 @@ import torch.nn as nn
 import pokerkit
 from dataclasses import dataclass
 from typing import Optional, Union
+from global_settings import MAX_TABLE_SIZE
 
 
 @dataclass(slots=True)
@@ -106,7 +107,7 @@ class CardEmbedding(nn.Module):
 
 
 class StateInterpreter(nn.Module):
-    def __init__(self, device, rank_dim: int = 16, suit_dim: int = 4, max_num_players: int = 9):
+    def __init__(self, device, rank_dim: int = 16, suit_dim: int = 4):
         super().__init__()
         self.device = device
         self.num_player_embedding_size = 4
@@ -115,10 +116,12 @@ class StateInterpreter(nn.Module):
         self.rank_dim = rank_dim
         self.suit_dim = suit_dim
         self.card_embedding = CardEmbedding(rank_dim, suit_dim).to(device)
-        self.max_num_players = max_num_players
-        self.num_player_embedding = nn.Embedding(max_num_players, self.num_player_embedding_size)
+        # self.max_num_players = MAX_TABLE_SIZE
 
-        self.rel_to_button_embedding = nn.Embedding(max_num_players, self.rel_to_button_embedding_size)
+        self.max_num_players = 9
+        self.num_player_embedding = nn.Embedding(self.max_num_players+1, self.num_player_embedding_size)
+
+        self.rel_to_button_embedding = nn.Embedding(self.max_num_players+1, self.rel_to_button_embedding_size)
 
     def expected_input_size(self):
         size = (self.rank_dim + self.suit_dim) * 2  # the 2 player cards
