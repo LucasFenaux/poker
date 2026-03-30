@@ -48,8 +48,8 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 
 class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
-                "sgd_steps": 80,  # openai implementation
-                # "sgd_steps": 5,
+                # "sgd_steps": 80,  # openai implementation
+                "sgd_steps": 5,
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
@@ -71,8 +71,12 @@ class PPO(OnPolicyAlgorithm):
         self.mode = mode
         self.network = network
         self.value_network = value_network
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
+
+        # self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
+
         self.discrete = discrete
         self.reward_normalization_scaler = reward_normalization_scaler
         self.entropy_coef = entropy_coef
@@ -85,7 +89,8 @@ class PPO(OnPolicyAlgorithm):
 
     def set_network(self, network):
         self.network = network
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
     def get_network(self):
         return self.network
@@ -93,10 +98,12 @@ class PPO(OnPolicyAlgorithm):
     def load_params(self, param_dicts):
         network_param_dict, value_param_dict = param_dicts
         self.network.load_state_dict(network_param_dict)
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
         self.value_network.load_state_dict(value_param_dict)
-        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        # self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
 
     def get_params(self):
         return [self.network.state_dict(), self.value_network.state_dict()]
@@ -126,6 +133,8 @@ class PPO(OnPolicyAlgorithm):
                 device=self.device,
                 dtype=torch.long if self.discrete else torch.float32,
             )
+        safe_actions = torch.clamp(actions, min=1e-5, max=1.0 - 1e-5)
+
         # print("actions", actions.shape)
         if batch_rnn_states is not None:
             # we need to reshape the rnn states to be in the proper shape: (LxBxD)
@@ -143,13 +152,17 @@ class PPO(OnPolicyAlgorithm):
             prob_sample_weights = sample_weights / sample_weights.sum()
 
         # batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
+        # we scale the rewards logarithmically to avoid explosion and to minimize the advantage distortion from
+        # big all-ins
+        sign = torch.sign(batch_rewards)
+        batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
 
         # pre-compute what we need
         with torch.no_grad():
         # old_network = copy.deepcopy(self.network)
         # old_network.requires_grad_(False)  # get a copy of the current network
             dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
-            logp_old = dist_old.log_prob(actions)
+            logp_old = dist_old.log_prob(safe_actions)
             if not self.discrete:
                 logp_old = logp_old.sum(dim=-1)  # Our discrete models return both which action and the bet sizing
 
@@ -189,6 +202,7 @@ class PPO(OnPolicyAlgorithm):
                 # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
                 value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards)
             else:
+                # can switch back to MSE since we added the log scaling
                 # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards, reduction="none")
                 value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards, reduction="none")
                 assert value_loss.dim() == normalized_sample_weights.dim()
@@ -203,7 +217,7 @@ class PPO(OnPolicyAlgorithm):
             # get the policy of current and old
             self.optimizer.zero_grad()
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            logp = dist.log_prob(actions)
+            logp = dist.log_prob(safe_actions)
 
             # add entropy regularization
             entropy = dist.entropy()
@@ -261,22 +275,25 @@ class PPO(OnPolicyAlgorithm):
         # compute a histogram
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            samples = dist.sample((1000,))[:, :, 0]
-
+            # samples = dist.sample((1000,))[:, :, 0]
+            samples = dist.sample((1000,))
+            action_hist = samples[:, :, 0]
+            betting_size = samples[:, :, 1]
             alpha_tensor = None
             beta_tensor = None
             if self.mode == "normal":
-                samples = torch.tanh(samples)
+                action_hist = torch.sigmoid(action_hist)
+                betting_size = torch.sigmoid(betting_size)
             elif self.mode == "beta":
                 dist: torch.distributions.Beta
-                alpha_tensor = dist.concentration1
-                beta_tensor = dist.concentration0
-
+                alpha_tensor = dist.concentration1[0]
+                beta_tensor = dist.concentration0[0]
 
         # Log the actual distribution shape to TensorBoard
 
         return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
-                "action_hist": samples, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor}
+                "action_hist": action_hist, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor,
+                "betting_size": betting_size, "rewards": batch_rewards}
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)

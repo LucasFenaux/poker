@@ -46,6 +46,8 @@ class TrainerActor:
             self.writer.add_scalar(f"Player_{player_id}/Loss", metrics["loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
             self.writer.add_histogram(f"Player_{player_id}/Action_Dist", metrics["action_hist"], player_training_count)
+            self.writer.add_histogram(f"Player_{player_id}/Betting_Size", metrics["betting_size"], player_training_count)
+            self.writer.add_histogram(f"Player_{player_id}/Rewards", metrics["rewards"], player_training_count)
 
             if self.mode == "beta":
                 # we grab the alpha and beta values

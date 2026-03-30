@@ -7,19 +7,23 @@ class Action(Enum):
     CHECK_OR_FOLD = 0
     CHECK_OR_CALL = 1
     RAISE = 2
-    ALL_IN = 3
+    # ALL_IN = 3
 
     @classmethod
     def decide_action(cls, action):
         # we assume the action has been passed through a Sigmoid or some other 0,1 bounding function
-        if action < 0.3:
+        # if action < 0.3:
+        if action < 1/3:
             return cls.CHECK_OR_FOLD
-        elif action < 0.6:
+        # elif action < 0.6:
+        elif action < 2/3:
             return cls.CHECK_OR_CALL
-        elif action < 0.9:
-            return cls.RAISE
         else:
-            return cls.ALL_IN
+            return cls.RAISE
+        # elif action < 0.9:
+        #     return cls.RAISE
+        # else:
+        #     return cls.ALL_IN
 
 def to_exact_fraction(amount: float) -> Fraction:
     return Fraction(str(amount))

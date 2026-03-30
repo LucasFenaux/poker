@@ -9,7 +9,11 @@ import pokerkit
 from dataclasses import dataclass
 from typing import Optional, Union
 from global_settings import MAX_TABLE_SIZE
+import math
 
+
+def sign_fn(x):
+    return 1 if x >= 0 else -1
 
 @dataclass(slots=True)
 class StateSnapshot:
@@ -55,6 +59,15 @@ def extract_state_snapshot(state, current_actor) -> StateSnapshot:
 
 def safe_div(a, b, default=0):
     return a / b if (b is not None and b != 0) else default
+
+def safe_log(x):
+    if isinstance(x, torch.Tensor):
+        sign = torch.sign(x)
+        x = sign * torch.log(x.abs() + 1)
+    else:
+        sign = sign_fn(x)
+        x = sign * math.log(math.fabs(x) + 1)
+    return x
 
 
 class CardEmbedding(nn.Module):
@@ -127,7 +140,8 @@ class StateInterpreter(nn.Module):
         size = (self.rank_dim + self.suit_dim) * 2  # the 2 player cards
         size += (self.rank_dim + self.suit_dim) * 5   # the 5 board cards
         size += 10  # sb, bb, pot, min_bet, max_bet features
-        size += 13 * self.max_num_players   # player features
+        size += 3  # log features
+        size += (13 + 2) * self.max_num_players   # player features
         size += self.rel_to_button_embedding_size * self.max_num_players  # rel to button features
         size += self.num_player_embedding_size
         size += 6 * self.max_num_players   # table state + player mask
@@ -291,25 +305,37 @@ class StateInterpreter(nn.Module):
         bb_to_min_bet = big_blind / min_bet
         min_bet_to_pot = min_bet / pot
         min_bet_to_max_bet = min_bet / max_bet
+        # adding log features
+        log_min_bet_to_bb = safe_log(safe_div(min_bet, big_blind))
 
         features.append(sb_to_min_bet)
         features.append(bb_to_min_bet)
         features.append(min_bet_to_pot)
         features.append(min_bet_to_max_bet)
+        # adding log features
+        features.append(log_min_bet_to_bb)
 
         # compute the max bet features
         sb_to_max_bet = small_blind / max_bet
         bb_to_max_bet = big_blind / max_bet
+        # adding log features
+        log_max_bet_to_bb = safe_log(safe_div(max_bet, big_blind))
         # can't compute max_bet to pot as it might blow up for early hands in deep stacked games
 
         features.append(sb_to_max_bet)
         features.append(bb_to_max_bet)
+        # adding log features
+        features.append(log_max_bet_to_bb)
 
         # compute pot features
         # we compute the ratio of the pot to the max stack
         pot_to_max_stack = safe_div(pot, max_stack, default=None)
+        # adding log features
+        log_pot_to_bb = safe_log(safe_div(pot, big_blind))
 
         features.append(pot_to_max_stack)
+        # adding log features
+        features.append(log_pot_to_bb)
 
         # compute bets and stack features for each player
 
@@ -332,6 +358,8 @@ class StateInterpreter(nn.Module):
                 bet_to_pot = bet / pot
                 sb_to_bet = safe_div(small_blind, bet)
                 bb_to_bet = safe_div(big_blind, bet)
+                # adding log features
+                log_bet_to_bb = safe_log(safe_div(bet, big_blind))
 
                 bet_to_min_bet = bet / min_bet
                 bet_to_max_bet = bet / max_bet
@@ -349,12 +377,14 @@ class StateInterpreter(nn.Module):
                 bb_to_stack = safe_div(big_blind, stack, 0)
                 min_bet_to_stack = safe_div(min_bet, stack, 0)
                 max_bet_to_stack = safe_div(max_bet, stack, 0)
+                # adding log features
+                log_stack_to_bb = safe_log(safe_div(stack, big_blind))
 
-                features.extend([bet_to_stack, bet_to_max_stack, bet_to_pot, sb_to_bet, bb_to_bet, bet_to_min_bet,
-                                 bet_to_max_bet, stack_to_max_stack, pot_to_stack, sb_to_stack, bb_to_stack,
-                                 min_bet_to_stack, max_bet_to_stack])
+                features.extend([bet_to_stack, bet_to_max_stack, bet_to_pot, sb_to_bet, bb_to_bet, log_bet_to_bb,
+                                 bet_to_min_bet, bet_to_max_bet, stack_to_max_stack, pot_to_stack, sb_to_stack, bb_to_stack,
+                                 min_bet_to_stack, max_bet_to_stack, log_stack_to_bb])
             else:
-                features.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                features.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
         # convert boolean features
         in_hand = torch.tensor(in_hand, dtype=torch.float32).to(self.device).flatten()
