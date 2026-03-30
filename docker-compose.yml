@@ -1,6 +1,6 @@
 services:
   casino_backend:
-    build: .                 # Tells Docker to build the Dockerfile in this directory
+    build: v2                 # Tells Docker to build the Dockerfile in this directory
     shm_size: '8gb'          # Replaces --shm-size="4g"
     ports:
       - "10001:10001"        # Replaces -p 10001:10001 (Ray Client)

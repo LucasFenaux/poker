@@ -9,6 +9,7 @@ dependencies = [
     "pip>=26.0.1",
     "pokerkit>=0.7.3",
     "ray[default]>=2.54.0",
+    "scipy>=1.17.1",
     "setuptools<82",
     "tensorboard>=2.20.0",
     "torch>=2.10.0",

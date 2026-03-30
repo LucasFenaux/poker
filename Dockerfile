@@ -24,7 +24,7 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --no-dev --no-install-project
 
 # Now copy your actual poker code
-COPY . .
+COPY v2 .
 
 # Run the project using `uv run`, which automatically uses the container's .venv
 #CMD ["uv", "run", "main.py"]
