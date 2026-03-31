@@ -9,7 +9,20 @@ class LeaderboardGUI:
         self.actor = actor_handle
         self.root = tk.Tk()
         self.root.title("Casino Live Leaderboard")
-        self.root.geometry("680x450")
+        # self.root.geometry("680x450")
+
+        # Get the current screen width and height
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+
+        # Set the window to fill the screen, starting at the top-left corner (0,0)
+        self.root.geometry(f"{screen_width}x{screen_height}+0+0")
+
+        # Attempt to natively "maximize" the window (handles taskbars better)
+        try:
+            self.root.state('zoomed')  # Works on Windows and most Linux
+        except tk.TclError:
+            pass  # Mac OS fallback is handled perfectly by the geometry line above
 
         # Get default button color to ensure cross-OS compatibility
         dummy_btn = tk.Button(self.root)

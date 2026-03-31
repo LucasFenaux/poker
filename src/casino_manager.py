@@ -112,7 +112,84 @@ class DataStorage:
         }
 
 
-class NewTableScheduler:
+class JITTableScheduler:
+    def __init__(self, table_min_size: int, table_max_size: int, player_ids):
+        self.player_ids = player_ids
+        self.table_max_size = table_max_size
+        self.table_min_size = table_min_size
+        assert table_max_size <= MAX_TABLE_SIZE
+        assert self.table_min_size <= self.table_max_size
+        # self.max_plans = 10
+        self.min_pool = max(table_max_size * 2, int(len(self.player_ids)/10))
+        self.weights = {
+            player_id: {
+                other_player_id: 0 for other_player_id in player_ids if player_id != other_player_id
+            } for player_id in player_ids
+        }
+        self.pool = set(self.player_ids[:])
+
+    def update_weights(self, player_id: int, other_players: list[tuple[int, int]]):
+        if other_players is not None:
+            player_weights = self.weights[player_id]
+            for other_player, other_player_version in other_players:
+                if other_player != player_id:
+                    player_weights[other_player] += other_player_version
+
+    def add(self, player_id: int):
+        """
+        Add a player into the scheduler to be scheduled for a game
+        :param player_id: Which player we are adding back in.
+        :param other_players:  The other players the player was playing with if he was a table and their current version
+        :return:
+        """
+        assert player_id not in self.pool, (f"Player duplicated - {player_id} is already in the pool")
+        self.pool.add(player_id)
+
+    def get_table(self):
+        if len(self.pool) <= self.min_pool:
+            return None
+
+        table = []
+
+        available_players = list(self.pool)
+        assert len(available_players) >= self.table_max_size
+        table_size = random.randint(self.table_min_size, self.table_max_size)
+
+        starter_idx = random.randint(0, len(available_players) - 1)
+        starter = available_players.pop(starter_idx)
+        table.append(starter)
+
+        starter_weights = self.weights[starter]
+        available_player_weights = []
+        # we then get the weights of the starter and pick from the remaining players based on those weights
+        for remaining_player in available_players:
+            available_player_weights.append(starter_weights[remaining_player])
+
+        # we invert them
+        max_weight = max(available_player_weights)
+        inverted_weights = [max_weight - remaining_player_weight + 1 for remaining_player_weight in available_player_weights]
+
+        # then we normalize them
+        normalized_player_weights = [inverted_weight / sum(inverted_weights) for
+                                    inverted_weight in inverted_weights]
+
+        assert math.isclose(sum(normalized_player_weights), 1.0, rel_tol=1e-5)
+
+        # select the followers based on their weight
+        followers = np.random.choice(available_players, p=normalized_player_weights, replace=False, size=table_size - 1)
+
+        for follower in followers:
+            follower = follower.item()
+            available_players.remove(follower)
+            table.append(follower)
+
+        for player in table:
+            self.pool.remove(player)
+
+        return table
+
+
+class PlanTableScheduler:
     def __init__(self, table_min_size: int, table_max_size: int, player_ids):
         self.player_ids = player_ids
         self.table_max_size = table_max_size
@@ -182,7 +259,14 @@ class NewTableScheduler:
             plan.append(set(table))
         return plan
 
-    def add(self, player_id: int, other_players: list[tuple[int, int]] = None):
+    def update_weights(self, player_id: int, other_players: list[tuple[int, int]]):
+        if other_players is not None:
+            player_weights = self.weights[player_id]
+            for other_player, other_player_version in other_players:
+                if other_player != player_id:
+                    player_weights[other_player] += other_player_version
+
+    def add(self, player_id: int):
         """
         Add a player into the scheduler to be scheduled for a game
         :param player_id: Which player we are adding back in.
@@ -190,12 +274,6 @@ class NewTableScheduler:
         :return:
         """
         assert player_id not in self.pool, (f"Player duplicated - {player_id} is already in the pool")
-        if other_players is not None:
-            # add the player version to the player weights
-            player_weights = self.weights[player_id]
-            for other_player, other_player_version in other_players:
-                if other_player != player_id:  # Safeguard!
-                    player_weights[other_player] += other_player_version
         self.pool.add(player_id)
         # self.was_updated = True
 
@@ -269,8 +347,8 @@ class CasinoManager:
         self.batch_size = 5000 if not RESOURCE_LIMITED else 20000
         self.on_policy = True
 
-        # self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
-        self.table_scheduler = NewTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+        # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+        self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
         self.table_send_queue = Queue(maxsize=0)
         self.table_receive_queue = Queue(maxsize=0)
@@ -395,6 +473,8 @@ class CasinoManager:
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
 
+                self.table_scheduler.update_weights(player_id, other_players)
+
                 self.is_playing[player_id] = False  # Mark them as free!
                 if self.data_storage.can_train(player_id):
                     batch = self.data_storage.get_batch(player_id)
@@ -410,7 +490,7 @@ class CasinoManager:
                     self.trainer_send_queue.put_nowait(trainer_data)
                 else:
                     # send them to play more games
-                    self.table_scheduler.add(player_id, other_players)
+                    self.table_scheduler.add(player_id)
 
             elif data["type"] == "termination":
                 table_id = data["table_id"]
