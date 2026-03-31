@@ -199,6 +199,8 @@ class LeaderboardGUI:
 
         except Exception as e:
             print(f"Waiting for actor... {e}")
+            self.root.after(1000, self.root.destroy)
+            return
 
         self.root.after(1000, self.refresh_data)
 

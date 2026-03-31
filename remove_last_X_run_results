@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+# Grab the first command line argument ($1).
+# If no argument is provided, default to 3.
+KEEP=${1:-3}
+
+echo "Starting cleanup..."
+echo "Keeping the $KEEP most recent runs and deleting the rest."
+
+# We inject the $KEEP variable directly into the string sent to Docker.
+# Notice we removed the internal X= from the Docker command entirely!
+docker compose run --rm casino_backend bash -c "cd /app/results && ls -d run_* | head -n -$KEEP | xargs rm -rf"
+
+echo "Cleanup complete!"

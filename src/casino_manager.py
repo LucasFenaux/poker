@@ -9,7 +9,7 @@ import os
 import torch
 import numpy as np
 
-from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE
+from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED
 from src.alg import PPO
 from src.trainer_actor import TrainerActor
 from src.table_actor import TableActor
@@ -18,8 +18,9 @@ import math
 
 
 class PlayerAI:
-    def __init__(self, models):
+    def __init__(self, models, optimizer_params=None):
         self.models = models
+        self.optimizer_params = optimizer_params
 
     def load_params(self, param_dicts):
         for model, param_dict in zip(self.models, param_dicts):
@@ -30,6 +31,12 @@ class PlayerAI:
         for model in self.models:
             params.append(model.state_dict())
         return params
+
+    def load_optimizers(self, optimizer_params):
+        self.optimizer_params = optimizer_params
+
+    def get_optimizer_params(self):
+        return self.optimizer_params
 
 
 # @ray.remote(num_cpus=0)
@@ -70,14 +77,21 @@ class DataStorage:
         assert len(self.sample_weights[player_id]) >= self.batch_size
 
         # since we are gonna train on the data, if we have a ONPolicy alg, we need to get rid of the extra
+        # unless we are not resource limited in which case we send everything
+        if RESOURCE_LIMITED:
+            states = self.states[player_id][:self.batch_size]
+            current_actors = self.current_actors[player_id][:self.batch_size]
+            rewards = self.rewards[player_id][:self.batch_size]
+            actions = self.actions[player_id][:self.batch_size]
+            sample_weights = self.sample_weights[player_id][:self.batch_size]
+        else:
+            states = self.states[player_id]
+            current_actors = self.current_actors[player_id]
+            rewards = self.rewards[player_id]
+            actions = self.actions[player_id]
+            sample_weights = self.sample_weights[player_id]
 
-        states = self.states[player_id][:self.batch_size]
-        current_actors = self.current_actors[player_id][:self.batch_size]
-        rewards = self.rewards[player_id][:self.batch_size]
-        actions = self.actions[player_id][:self.batch_size]
-        sample_weights = self.sample_weights[player_id][:self.batch_size]
-
-        if self.on_policy:
+        if self.on_policy or not RESOURCE_LIMITED:
             self.states[player_id] = []
             self.current_actors[player_id] = []
             self.rewards[player_id] = []
@@ -105,7 +119,9 @@ class NewTableScheduler:
         self.table_min_size = table_min_size
         assert table_max_size <= MAX_TABLE_SIZE
         assert self.table_min_size <= self.table_max_size
-        self.max_plans = 10
+        # self.max_plans = 10
+        self.max_plans = np.inf
+        self.min_pool = max(table_max_size * 2, int(len(self.player_ids)/10))
         self.plan_count = 0
         self.weights = {
             player_id: {
@@ -114,8 +130,8 @@ class NewTableScheduler:
         }
         self.pool = set(self.player_ids[:])
         self.plans: list[list[set]] = []
-        self.was_updated = False
-        self.already_returned_none = False
+        # self.was_updated = False
+        # self.already_returned_none = False
 
     def _generate_plan(self):
         """
@@ -173,20 +189,17 @@ class NewTableScheduler:
         :param other_players:  The other players the player was playing with if he was a table and their current version
         :return:
         """
-        assert player_id not in self.pool, print(f"Player duplicated - {player_id} is already in the pool")
+        assert player_id not in self.pool, (f"Player duplicated - {player_id} is already in the pool")
         if other_players is not None:
             # add the player version to the player weights
             player_weights = self.weights[player_id]
             for other_player, other_player_version in other_players:
-                player_weights[other_player] += other_player_version
+                if other_player != player_id:  # Safeguard!
+                    player_weights[other_player] += other_player_version
         self.pool.add(player_id)
-        self.was_updated = True
+        # self.was_updated = True
 
-    def get_table(self):
-        if not self.was_updated and self.already_returned_none:
-            # we have not changed since last query and we already verified that no table is available, we lazily return
-            return None
-
+    def _find_table(self):
         # we get the current plan and check if a table is available with the players in the pool
         for i, plan in enumerate(self.plans):
             for j, potential_table in enumerate(plan):
@@ -201,15 +214,26 @@ class NewTableScheduler:
                     for player in table:
                         self.pool.remove(player)
 
-                    self.was_updated = True
-                    self.already_returned_none = False
                     return list(table)
+        return None
+
+    def get_table(self):
+        if len(self.pool) < self.min_pool:
+        # if not self.was_updated and self.already_returned_none:
+            # we have not changed since last query and we already verified that no table is available, we lazily return
+            return None
+
+        # we get the current plan and check if a table is available with the players in the pool
+        table = self._find_table()
+
+        if table is not None:
+            return table
 
         # if we got here, it means no suitable table was found
         # we first check if we already have too many plans
         if len(self.plans) >= self.max_plans:
             # too many plans, can't generate a new one, we wait until players catch up to move forward
-            self.already_returned_none = True
+            # self.already_returned_none = True
             return None
 
         # we still have room to create a new plan
@@ -217,11 +241,10 @@ class NewTableScheduler:
         print(f"Newest plan ({self.plan_count}): {new_plan} | {len(self.plans)}")
         self.plan_count += 1
         self.plans.append(new_plan)
-        self.was_updated = True
+        # self.was_updated = True
 
         # we try to find a table again
-        table = self.get_table()
-        self.already_returned_none = table is None
+        table = self._find_table()
         return table
 
 
@@ -243,7 +266,7 @@ class CasinoManager:
 
         self.table_max_size = 2
         self.table_min_size = 2
-        self.batch_size = 5000
+        self.batch_size = 5000 if not RESOURCE_LIMITED else 20000
         self.on_policy = True
 
         # self.table_scheduler = TableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
@@ -291,7 +314,7 @@ class CasinoManager:
         self.stop_event = threading.Event()
         available = ray.available_resources()
         free_cpus = available.get('CPU', 0)
-        assert free_cpus > 0, print(f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
+        assert free_cpus > 0, (f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
                                                 f"requested.")
 
     def receive_from_trainer_queue(self):
@@ -306,10 +329,11 @@ class CasinoManager:
 
         if not queue_empty:
             if message["type"] == "player":
-                player_id, new_weights = message["player_id"], message["new_weights"]
+                player_id, new_weights, new_optimizer_params = message["player_id"], message["new_weights"], message["new_optimizer_params"]
                 # update that player's model weights
                 player: PlayerAI = ray.get(self.players[player_id])
                 player.load_params(new_weights)
+                player.load_optimizers(new_optimizer_params)
                 self.players[player_id] = ray.put(player)
                 self.player_training_counts[player_id] += 1
 

@@ -49,6 +49,7 @@ class PPO(OnPolicyAlgorithm):
     default_hyperparameters = {
                 # "sgd_steps": 80,  # openai implementation
                 "sgd_steps": 5,
+                "base_batch_size": 5000,
                 "clip_threshold": 0.2,  # openai
                 "target_kl": 0.01,  # openai
                 "lr": 1e-4,
@@ -59,7 +60,7 @@ class PPO(OnPolicyAlgorithm):
                 }
     key = "ppo"
     def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
-                 grad_clip_norm, entropy_coef, mode, discrete: bool = False):
+                 grad_clip_norm, entropy_coef, base_batch_size, mode, discrete: bool = False):
         super(PPO, self).__init__( lr, device)
         self.sgd_steps = sgd_steps
         self.clip_threshold = clip_threshold
@@ -70,15 +71,16 @@ class PPO(OnPolicyAlgorithm):
         self.mode = mode
         self.network = network
         self.value_network = value_network
-        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        # self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
-        # self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
-        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
+        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        # self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
 
         self.discrete = discrete
         self.reward_normalization_scaler = reward_normalization_scaler
         self.entropy_coef = entropy_coef
+        self.base_batch_size = base_batch_size
 
     @staticmethod
     def init_networks(device, discrete, mode):
@@ -88,8 +90,8 @@ class PPO(OnPolicyAlgorithm):
 
     def set_network(self, network):
         self.network = network
-        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        # self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
     def get_network(self):
         return self.network
@@ -97,18 +99,28 @@ class PPO(OnPolicyAlgorithm):
     def load_params(self, param_dicts):
         network_param_dict, value_param_dict = param_dicts
         self.network.load_state_dict(network_param_dict)
-        # self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        # self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
         self.value_network.load_state_dict(value_param_dict)
-        # self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
-        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
+        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        # self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
+
+    def load_optimizer_params(self, optimizer_params):
+        network_opt_params, value_opt_params = optimizer_params
+        self.optimizer.load_state_dict(network_opt_params)
+        self.value_optimizer.load_state_dict(value_opt_params)
 
     def get_params(self):
         return [self.network.state_dict(), self.value_network.state_dict()]
 
+    def get_optimizer_params(self):
+        return [self.optimizer.state_dict(), self.value_optimizer.state_dict()]
+
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
+        batch_size = len(batch_states)
+        sgd_steps = max(self.sgd_steps, self.sgd_steps * batch_size / self.base_batch_size)
         if isinstance(batch_rewards[0], torch.Tensor):
             batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
         else:
@@ -188,7 +200,7 @@ class PPO(OnPolicyAlgorithm):
         # batch_rewards = normalize_rewards(batch_rewards, self.env_name)
 
         # we then do multiple steps of SGD for the policy update
-        for i in range(self.sgd_steps):
+        for i in range(sgd_steps):
             # compute what we need
             self.value_optimizer.zero_grad()
             value_function = self.value_network(*states).squeeze(-1)

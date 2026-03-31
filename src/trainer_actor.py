@@ -27,10 +27,12 @@ class TrainerActor:
     def save_player(self, player_id, params):
         torch.save(params, os.path.join(self.player_save_folder, f"{player_id}.pt"))
 
-    def run(self, player_id, player_state_dicts, data_batch, player_training_count: int):
+    def run(self, player_id, player_state_dicts, data_batch, player_training_count: int, optimizer_state_dict = None):
         try:
             alg = PPO(device=self.device, mode=self.mode, discrete=self.discrete, **PPO.default_hyperparameters)
             alg.load_params(player_state_dicts)
+            if optimizer_state_dict is not None:
+                alg.load_optimizer_params(optimizer_state_dict)
             # run the model update
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
                                  batch_rnn_states=data_batch.get("batch_rnn_states", None),
@@ -61,10 +63,12 @@ class TrainerActor:
 
             # send the updated model params back to the manager
             new_weights = alg.get_params()
+            new_optimizer_params = alg.get_optimizer_params()
             message = {
                 "type": "player",
                 "player_id": player_id,
                 "new_weights": new_weights,
+                "new_optimizer_params": new_optimizer_params,
             }
             self.out_queue.put(message)
             self.num_training_ran += 1
@@ -76,6 +80,7 @@ class TrainerActor:
                 "type": "player",
                 "player_id": player_id,
                 "new_weights": player_state_dicts,
+                "new_optimizer_params": optimizer_state_dict,
             }
             self.out_queue.put(message)
             return None
@@ -105,6 +110,6 @@ class TrainerActor:
             batch = ray.get(data["batch_ref"])
             player_training_count = data["player_training_count"]
 
-            params = self.run(player_id, player.get_params(), batch, player_training_count)
+            params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
             if params is not None:
                 self.save_player(player_id, params)
