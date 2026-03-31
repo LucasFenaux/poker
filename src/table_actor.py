@@ -4,11 +4,11 @@ import pokerkit
 import ray
 from ray.util.queue import Queue, Empty
 from pokerkit import NoLimitTexasHoldem, Automation
-from action_interpreter import ActionInterpreter, Action
-from state_interpreter import extract_state_snapshot
+from src.action_interpreter import ActionInterpreter, Action
+from src.state_interpreter import extract_state_snapshot
 import random
 import torch
-from alg import PPOInferenceWrapper, PPO
+from src.alg import PPOInferenceWrapper, PPO
 
 
 

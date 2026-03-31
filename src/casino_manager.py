@@ -9,11 +9,11 @@ import os
 import torch
 import numpy as np
 
-from global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE
-from alg import PPO
-from trainer_actor import TrainerActor
-from table_actor import TableActor
-from leaderboard_actor import LeaderboardActor
+from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE
+from src.alg import PPO
+from src.trainer_actor import TrainerActor
+from src.table_actor import TableActor
+from src.leaderboard_actor import LeaderboardActor
 import math
 
 

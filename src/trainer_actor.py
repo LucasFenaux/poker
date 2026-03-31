@@ -4,7 +4,7 @@ import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
 
-from alg import PPO
+from src.alg import PPO
 
 
 @ray.remote(num_cpus=1)

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#scp -r ./src/ growl:/home/lprfenau/poker/src
+#scp -r ./run/ growl:/home/lprfenau/poker/run
+#scp .python-version growl:/home/lprfenau/poker/
+#scp Dockerfile growl:/home/lprfenau/poker/
+#scp docker-compose.yml growl:/home/lprfenau/poker/
+#scp pyproject.toml growl:/home/lprfenau/poker/
+#scp uv.lock growl:/home/lprfenau/poker/
+
+scp -r ./src/ click1:/home/lprfenau/poker/src
+scp -r ./run/ click1:/home/lprfenau/poker/run
+scp .python-version click1:/home/lprfenau/poker/
+scp Dockerfile click1:/home/lprfenau/poker/
+scp docker-compose.yml click1:/home/lprfenau/poker/
+scp pyproject.toml click1:/home/lprfenau/poker/
+scp uv.lock click1:/home/lprfenau/poker/
+

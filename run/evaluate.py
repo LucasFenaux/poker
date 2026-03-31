@@ -8,9 +8,9 @@ from scipy import stats
 from pokerkit import NoLimitTexasHoldem, Automation, State, calculate_equities, parse_range, Deck, StandardHighHand
 
 # --- Local Project Imports ---
-from state_interpreter import extract_state_snapshot
-from action_interpreter import ActionInterpreter, Action
-from alg import PPO, PPOInferenceWrapper
+from src.state_interpreter import extract_state_snapshot
+from src.action_interpreter import ActionInterpreter, Action
+from src.alg import PPO, PPOInferenceWrapper
 
 
 # --- 1. Baseline Bot Logic ---

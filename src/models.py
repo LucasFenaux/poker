@@ -6,7 +6,7 @@ from torch.distributions.beta import Beta
 import torch.nn.functional as F
 import pokerkit
 
-from state_interpreter import StateInterpreter, StateSnapshot
+from src.state_interpreter import StateInterpreter, StateSnapshot
 
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0

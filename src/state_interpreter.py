@@ -8,7 +8,6 @@ import torch.nn as nn
 import pokerkit
 from dataclasses import dataclass
 from typing import Optional, Union
-from global_settings import MAX_TABLE_SIZE
 import math
 
 

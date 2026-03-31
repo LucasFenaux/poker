@@ -210,7 +210,7 @@ if __name__ == "__main__":
         leaderboard_actor = ray.get_actor("GlobalLeaderboard")
         print("Successfully connected to the Leaderboard!")
         gui = LeaderboardGUI(leaderboard_actor)
-    except ValueError:
+    except Exception:
         print("Could not find the LeaderboardActor. Is the Casino running in Docker?")
     finally:
         ray.shutdown()

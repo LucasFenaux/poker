@@ -7,7 +7,7 @@ from scipy import stats
 import time  # <-- Imported the time module
 
 # --- Local Project Imports ---
-from action_interpreter import ActionInterpreter
+from src.action_interpreter import ActionInterpreter
 
 # --- Import Shared Logic from evaluate.py ---
 from evaluate import (

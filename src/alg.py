@@ -5,9 +5,8 @@ from typing import Union
 import numpy as np
 import torch
 from torch.distributions import Categorical, Normal
-import copy
 import pokerkit
-from models import get_value_model, load_dummy_model
+from src.models import get_value_model, load_dummy_model
 
 
 class BaseAlgorithm:

@@ -24,8 +24,10 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --no-dev --no-install-project
 
 # Now copy your actual poker code
-COPY v2 .
+COPY ./src ./src
+COPY ./run ./run
 
+ENV PYTHONPATH=/app
 # Run the project using `uv run`, which automatically uses the container's .venv
 #CMD ["uv", "run", "main.py"]
-CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python main.py
+CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python run/main.py

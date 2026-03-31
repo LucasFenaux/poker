@@ -8,9 +8,14 @@ import os
 
 NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
 NUM_GPUS=0
-NUM_PLAYERS=10
-NUM_TABLES=3
-NUM_TRAINERS=3
 MAX_TABLE_SIZE=2
 
+# local settings
+# NUM_PLAYERS=10
+# NUM_TABLES=3
+# NUM_TRAINERS=3
 
+# ripple settings
+NUM_PLAYERS=50
+NUM_TABLES=20
+NUM_TRAINERS=25

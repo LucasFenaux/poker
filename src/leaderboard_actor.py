@@ -4,7 +4,7 @@ import json
 import os
 import asyncio
 from fractions import Fraction
-from global_settings import NUM_TRAINERS, NUM_TABLES
+from src.global_settings import NUM_TRAINERS, NUM_TABLES
 
 
 class PokerEncoder(json.JSONEncoder):

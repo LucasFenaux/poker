@@ -1,12 +1,10 @@
-from global_settings import NUM_CPUS, NUM_GPUS
-
 import ray
 import torch
 import os
 from datetime import datetime
 import uuid
 
-from casino_manager import CasinoManager
+from src.casino_manager import CasinoManager
 
 
 def get_save_folder(base_path="results"):
