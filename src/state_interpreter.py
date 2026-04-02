@@ -9,6 +9,7 @@ import pokerkit
 from dataclasses import dataclass
 from typing import Optional, Union
 import math
+from global_settings import MAX_TABLE_SIZE
 
 
 def sign_fn(x):
@@ -128,9 +129,9 @@ class StateInterpreter(nn.Module):
         self.rank_dim = rank_dim
         self.suit_dim = suit_dim
         self.card_embedding = CardEmbedding(rank_dim, suit_dim).to(device)
-        # self.max_num_players = MAX_TABLE_SIZE
+        self.max_num_players = MAX_TABLE_SIZE
 
-        self.max_num_players = 9
+        # self.max_num_players = 9
         self.num_player_embedding = nn.Embedding(self.max_num_players+1, self.num_player_embedding_size)
 
         self.rel_to_button_embedding = nn.Embedding(self.max_num_players+1, self.rel_to_button_embedding_size)

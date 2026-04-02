@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
 
-docker cp poker-casino_backend-1:/app/results ./results
+docker cp poker-casino_backend-1:/app/results ./

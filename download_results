@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+rsync -avz -e "ssh -q" click1:/home/lprfenau/poker/results/ ./results/

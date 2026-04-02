@@ -106,10 +106,27 @@ class TrainerActor:
             assert data["type"] == "player"
 
             player_id = data["player_id"]
-            player = ray.get(data["player_ref"])
-            batch = ray.get(data["batch_ref"])
-            player_training_count = data["player_training_count"]
 
-            params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
-            if params is not None:
-                self.save_player(player_id, params)
+            try:
+                player = ray.get(data["player_ref"])
+                batch = ray.get(data["batch_ref"])
+                player_training_count = data["player_training_count"]
+
+                params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
+                if params is not None:
+                    self.save_player(player_id, params)
+            except Exception as e:
+                print(f"CRITICAL TRAINER CRASH! Rescuing player {player_id}: {e}")
+
+                # If we couldn't even get the player ref, we have to fake the weights
+                # to prevent the manager from crashing on receipt.
+                fallback_weights = player.get_params() if 'player' in locals() else None
+                fallback_optim = player.get_optimizer_params() if 'player' in locals() else None
+
+                message = {
+                    "type": "player",
+                    "player_id": player_id,
+                    "new_weights": fallback_weights,
+                    "new_optimizer_params": fallback_optim,
+                }
+                self.out_queue.put(message)

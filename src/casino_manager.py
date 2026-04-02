@@ -419,6 +419,20 @@ class CasinoManager:
                     # add the player to the table scheduler
                     if not self.is_playing[player_id]:
                         self.table_scheduler.add(player_id)
+                else:
+                    # They STILL have enough data to train again!
+                    # Send them straight back to the training queue.
+                    batch = self.data_storage.get_batch(player_id)
+                    batch_ref = ray.put(batch)
+
+                    trainer_data = {
+                        "type": "player",
+                        "player_id": player_id,
+                        "batch_ref": batch_ref,
+                        "player_ref": self.players[player_id],
+                        "player_training_count": self.player_training_counts[player_id]
+                    }
+                    self.trainer_send_queue.put_nowait(trainer_data)
 
             elif message["type"] == "termination":
                 trainer_id = message["trainer_id"]

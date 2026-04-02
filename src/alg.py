@@ -55,7 +55,7 @@ class PPO(OnPolicyAlgorithm):
                 "lr": 1e-4,
                 "value_lr": 5e-4,
                 "reward_normalization_scaler": 1,
-                "entropy_coef": 1e-2,
+                "entropy_coef": 1e-4,
                 "grad_clip_norm": 0.5,
                 }
     key = "ppo"

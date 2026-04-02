@@ -18,8 +18,13 @@ class PokerModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
-        self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 64), nn.GELU(),
-                                    nn.Linear(64, 16), nn.GELU())
+        # self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 64), nn.GELU(),
+        #                             nn.Linear(64, 16), nn.GELU())
+        self.embed_net = nn.Sequential(
+            nn.Linear(self.input_dim, 256), nn.GELU(),
+            nn.Linear(256, 128), nn.GELU(),
+            nn.Linear(128, 64), nn.GELU()
+        )
         self.deterministic = deterministic
 
         self.mu_net = None
@@ -90,8 +95,9 @@ class ValueModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
 
-        self.net = nn.Sequential(nn.Linear(self.input_dim, 64), nn.GELU(),
-                                 nn.Linear(64, 16), nn.GELU(),
+        self.net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
+                                 nn.Linear(256, 128), nn.GELU(),
+                                 nn.Linear(128, 64), nn.GELU(),
                                  nn.Linear(16, 1))
 
 

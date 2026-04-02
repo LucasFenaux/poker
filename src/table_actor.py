@@ -335,7 +335,7 @@ class TableActor:
         except Exception as e:
             # raise e
             print(f"Exception: {e} encountered in Table {self.table_id}")
-            return False
+            return True
 
     def _play_linear_round(self):
         try:
@@ -475,63 +475,78 @@ class TableActor:
                         }
                         self.out_queue.put(message)
                         return True
-
                 # otherwise, we are good to go
                 assert data["type"] == "players"
                 players, player_ids = ray.get(data["player_refs"]), data["player_ids"]
-                self.current_player_versions = data["player_versions"]
+                try:
 
-                player_params_list = [player.get_params() for player in players]
+                    self.current_player_versions = data["player_versions"]
 
-                session_hand_info = {
-                    pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": []}
-                    for pid in player_ids
-                }
-                session_player_winnings = {pid: 0.0 for pid in player_ids}
+                    player_params_list = [player.get_params() for player in players]
 
-                for _ in range(self.replay):
-                    shuffle = list(range(len(player_ids)))
-                    random.shuffle(shuffle)
-                    shuffled_player_params_list = [player_params_list[i] for i in shuffle]
-                    shuffled_player_ids = [player_ids[i] for i in shuffle]
-                    self.reset(shuffled_player_params_list, shuffled_player_ids, **data["table_params"])
-                    success = self.play_game()
+                    session_hand_info = {
+                        pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": []}
+                        for pid in player_ids
+                    }
+                    session_player_winnings = {pid: 0.0 for pid in player_ids}
 
-                    if success:
-                        # ---> NEW: Aggregate data into the session accumulators
-                        for pid in player_ids:
-                            session_hand_info[pid]["states"].extend(self.hand_info[pid]["states"])
-                            session_hand_info[pid]["current_actors"].extend(self.hand_info[pid]["current_actors"])
-                            session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
-                            session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
-                            session_hand_info[pid]["sample_weights"].extend(self.hand_info[pid]["sample_weights"])
+                    for _ in range(self.replay):
+                        shuffle = list(range(len(player_ids)))
+                        random.shuffle(shuffle)
+                        shuffled_player_params_list = [player_params_list[i] for i in shuffle]
+                        shuffled_player_ids = [player_ids[i] for i in shuffle]
+                        self.reset(shuffled_player_params_list, shuffled_player_ids, **data["table_params"])
+                        success = self.play_game()
 
-                            session_player_winnings[pid] += self.player_winnings[pid]
+                        if success:
+                            # ---> NEW: Aggregate data into the session accumulators
+                            for pid in player_ids:
+                                session_hand_info[pid]["states"].extend(self.hand_info[pid]["states"])
+                                session_hand_info[pid]["current_actors"].extend(self.hand_info[pid]["current_actors"])
+                                session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
+                                session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
+                                session_hand_info[pid]["sample_weights"].extend(self.hand_info[pid]["sample_weights"])
 
-                batch = []
-                # ---> NEW: Send the batched data exactly once per session
-                num_samples = []
-                for pid in player_ids:
-                    p_index = player_ids.index(pid)
-                    p_version = self.current_player_versions[p_index]
-                    num_samples.append(len(session_hand_info[pid]["states"]))
-                    batch.append({
-                        "type": "data",
-                        "table_id": self.table_id,
-                        "player_id": pid,
-                        "hand_info": ray.put(session_hand_info[pid]),
-                        "player_winnings": session_player_winnings[pid],
-                        "num_samples": len(session_hand_info[pid]["states"]),
-                        "version": p_version
-                    })
-                # print(self.table_id, self.num_games_played, num_samples)
-                # now we send back the players
-                for player_id in player_ids:
-                    other_players = [(pid, self.current_player_versions[player_ids.index(pid)]) for pid in player_ids if player_id != pid]
-                    batch.append({
-                        "type": "player",
-                        "table_id": self.table_id,
-                        "player_id": player_id,
-                        "other_players": other_players
-                    })
-                self.out_queue.put_nowait_batch(batch)
+                                session_player_winnings[pid] += self.player_winnings[pid]
+
+                    batch = []
+                    # ---> NEW: Send the batched data exactly once per session
+                    num_samples = []
+                    for pid in player_ids:
+                        p_index = player_ids.index(pid)
+                        p_version = self.current_player_versions[p_index]
+                        num_samples.append(len(session_hand_info[pid]["states"]))
+                        batch.append({
+                            "type": "data",
+                            "table_id": self.table_id,
+                            "player_id": pid,
+                            "hand_info": ray.put(session_hand_info[pid]),
+                            "player_winnings": session_player_winnings[pid],
+                            "num_samples": len(session_hand_info[pid]["states"]),
+                            "version": p_version
+                        })
+                    # print(self.table_id, self.num_games_played, num_samples)
+                    # now we send back the players
+                    for player_id in player_ids:
+                        other_players = [(pid, self.current_player_versions[player_ids.index(pid)]) for pid in player_ids if player_id != pid]
+                        batch.append({
+                            "type": "player",
+                            "table_id": self.table_id,
+                            "player_id": player_id,
+                            "other_players": other_players
+                        })
+                    self.out_queue.put_nowait_batch(batch)
+
+                except Exception as e:
+                    print(f"Exception: {e} encountered in Table {self.table_id}")
+                    batch = []
+
+                    # now we send back the players
+                    for player_id in player_ids:
+                        batch.append({
+                            "type": "player",
+                            "table_id": self.table_id,
+                            "player_id": player_id,
+                            "other_players": player_ids   # we have safety logic that prevents a weight with itself
+                        })
+                    self.out_queue.put_nowait_batch(batch)
