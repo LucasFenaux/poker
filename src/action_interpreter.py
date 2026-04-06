@@ -13,13 +13,22 @@ class Action(Enum):
     def decide_action(cls, action):
         # we assume the action has been passed through a Sigmoid or some other 0,1 bounding function
         # if action < 0.3:
-        if action < 1/3:
+        if action < cls.get_call_threshold():
             return cls.CHECK_OR_FOLD
         # elif action < 0.6:
-        elif action < 2/3:
+        elif action < cls.get_raise_threshold():
             return cls.CHECK_OR_CALL
         else:
             return cls.RAISE
+
+    @staticmethod
+    def get_raise_threshold():
+        return 2/3
+
+    @staticmethod
+    def get_call_threshold():
+        return 1/3
+
         # elif action < 0.9:
         #     return cls.RAISE
         # else:

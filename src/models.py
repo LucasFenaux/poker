@@ -33,13 +33,15 @@ class PokerModel(nn.Module):
         self.beta_net = None
         if self.mode == "normal":
             # one dim for which action and one dim for bet sizing
-            self.mu_net = nn.Linear(16, 2)
+            self.mu_net = nn.Linear(64, 2)
             if not deterministic:
-                self.std_net = nn.Linear(16, 2)
+                self.std_net = nn.Linear(64, 2)
         elif self.mode == "beta":
-            self.alpha_net = nn.Linear(16, 2)
+            self.alpha_net = nn.Linear(64, 2)
+            nn.init.constant_(self.alpha_net.bias, 1.0)
             if not self.deterministic:
-                self.beta_net = nn.Linear(16, 2)
+                self.beta_net = nn.Linear(64, 2)
+                nn.init.constant_(self.beta_net.bias, 1.0)
         else:
             raise NotImplementedError(self.mode)
 
@@ -98,7 +100,7 @@ class ValueModel(nn.Module):
         self.net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
                                  nn.Linear(256, 128), nn.GELU(),
                                  nn.Linear(128, 64), nn.GELU(),
-                                 nn.Linear(16, 1))
+                                 nn.Linear(64, 1))
 
 
     def _forward(self, feature_vector: torch.Tensor):

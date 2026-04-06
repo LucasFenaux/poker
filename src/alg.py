@@ -7,6 +7,7 @@ import torch
 from torch.distributions import Categorical, Normal
 import pokerkit
 from src.models import get_value_model, load_dummy_model
+from src.action_interpreter import Action
 
 
 class BaseAlgorithm:
@@ -55,7 +56,8 @@ class PPO(OnPolicyAlgorithm):
                 "lr": 1e-4,
                 "value_lr": 5e-4,
                 "reward_normalization_scaler": 1,
-                "entropy_coef": 1e-4,
+                # "entropy_coef": 1e-4,
+                "entropy_coef": 0,
                 "grad_clip_norm": 0.5,
                 }
     key = "ppo"
@@ -172,10 +174,23 @@ class PPO(OnPolicyAlgorithm):
         with torch.no_grad():
         # old_network = copy.deepcopy(self.network)
         # old_network.requires_grad_(False)  # get a copy of the current network
+        #     dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
+        #     logp_old = dist_old.log_prob(safe_actions)
+        #     if not self.discrete:
+        #         logp_old = logp_old.sum(dim=-1)  # Our discrete models return both which action and the bet sizing
             dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
-            logp_old = dist_old.log_prob(safe_actions)
             if not self.discrete:
-                logp_old = logp_old.sum(dim=-1)  # Our discrete models return both which action and the bet sizing
+                logp_all = dist_old.log_prob(safe_actions)
+                # logp_all[:, 0] is the action choice, logp_all[:, 1] is the bet sizing
+
+                # Create a mask: 1.0 if it was a RAISE (>= 2/3), 0.0 otherwise
+                is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
+
+                # Only add the bet sizing log_prob if the action was actually a RAISE
+                logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+            else:
+                logp_old = dist_old.log_prob(safe_actions)
+
 
             value_function = self.value_network(*states).squeeze(-1)
 
@@ -228,14 +243,28 @@ class PPO(OnPolicyAlgorithm):
             # get the policy of current and old
             self.optimizer.zero_grad()
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            logp = dist.log_prob(safe_actions)
+            # logp = dist.log_prob(safe_actions)
 
             # add entropy regularization
-            entropy = dist.entropy()
+            # entropy = dist.entropy()
+            #
+            # if not self.discrete:
+            #     logp = logp.sum(dim=-1)
+            #     entropy = entropy.sum(dim=-1)  # Sum entropy across action dimensions for continuous spaces
 
+
+            # masked irrelevant bet sizing
             if not self.discrete:
-                logp = logp.sum(dim=-1)
-                entropy = entropy.sum(dim=-1)  # Sum entropy across action dimensions for continuous spaces
+                logp_all = dist.log_prob(safe_actions)
+                is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
+                logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+
+                # You also need to mask the entropy!
+                entropy_all = dist.entropy()
+                entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+            else:
+                logp = dist.log_prob(safe_actions)
+                entropy = dist.entropy()
 
             with torch.no_grad():
                 logratio = logp - logp_old

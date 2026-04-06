@@ -97,7 +97,7 @@ def get_latest_run_folder(base_path="results"):
 def load_ai_player(model_path, device):
     models = PPO.init_networks(device, mode="beta", discrete=False)
     ai_player = PPOInferenceWrapper(models, discrete=False)
-    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    checkpoint, _ = torch.load(model_path, map_location=device, weights_only=True)
     ai_player.load_params(checkpoint)
     ai_player.to(device)
     return ai_player

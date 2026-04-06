@@ -72,7 +72,7 @@ class TrainerActor:
             }
             self.out_queue.put(message)
             self.num_training_ran += 1
-            return new_weights
+            return new_weights, new_optimizer_params
         except Exception as e:
             print(f"Exception: {e} encountered in Trainer {self.trainer_id} training player: {player_id}")
             # abort training and send back the original weights
