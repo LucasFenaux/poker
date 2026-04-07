@@ -76,6 +76,8 @@ class DataStorage:
         assert len(self.current_actors[player_id]) >= self.batch_size
         assert len(self.sample_weights[player_id]) >= self.batch_size
 
+        assert not RESOURCE_LIMITED, f"RESOURCE LIMITED {RESOURCE_LIMITED}"
+        # print(RESOURCE_LIMITED)
         # since we are gonna train on the data, if we have a ONPolicy alg, we need to get rid of the extra
         # unless we are not resource limited in which case we send everything
         if RESOURCE_LIMITED:
@@ -344,7 +346,7 @@ class CasinoManager:
 
         self.table_max_size = 2
         self.table_min_size = 2
-        self.batch_size = 5000 if not RESOURCE_LIMITED else 20000
+        self.batch_size = 5000 if RESOURCE_LIMITED else 20000
         self.on_policy = True
 
         # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)

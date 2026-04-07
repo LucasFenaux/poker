@@ -37,16 +37,19 @@ class TrainerActor:
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
                                  batch_rnn_states=data_batch.get("batch_rnn_states", None),
                                  sample_weights=data_batch.get("sample_weights", None))
+            batch_size = len(data_batch["rewards"])
             # trainer metrics
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Loss", metrics["loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Policy_Loss", metrics["policy_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Value_Loss", metrics["value_loss"], self.num_training_ran)
+            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Batch_Size", batch_size, self.num_training_ran)
 
             self.writer.add_scalar(f"Player_{player_id}/Policy_Loss", metrics["policy_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Value_Loss", metrics["value_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Loss", metrics["loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
+            self.writer.add_scalar(f"Player_{player_id}/Batch_Size", batch_size, player_training_count)
             self.writer.add_histogram(f"Player_{player_id}/Action_Dist", metrics["action_hist"], player_training_count)
             self.writer.add_histogram(f"Player_{player_id}/Betting_Size", metrics["betting_size"], player_training_count)
             self.writer.add_histogram(f"Player_{player_id}/Rewards", metrics["rewards"], player_training_count)

@@ -1,7 +1,7 @@
 from enum import Enum
 import torch.nn as nn
 from fractions import Fraction
-
+import math
 
 class Action(Enum):
     CHECK_OR_FOLD = 0
@@ -52,12 +52,27 @@ class ActionInterpreter(nn.Module):
         assert x.shape[-1] == 2
         assert len(x.shape) <= 2
 
+        # def bet_size_scaling(bet):
+        #     return to_exact_fraction(bet * (max_bet - min_bet) + min_bet)
+
         def bet_size_scaling(bet):
-            # normalized_multiplier = (bet + 1.0) / 2.0
+            # exponential scaling rather than linear scaling
+            safe_min = max(float(min_bet), 1e-5)
+            safe_max = max(float(max_bet), safe_min)
 
-            # return to_exact_fraction(normalized_multiplier * (max_bet - min_bet) + min_bet)
-            return to_exact_fraction(bet * (max_bet - min_bet) + min_bet)
+            if safe_max <= safe_min:
+                return to_exact_fraction(safe_min)
 
+            log_min = math.log(safe_min)
+            log_max = math.log(safe_max)
+
+            # Interpolate in log-space
+            scaled_log = log_min + bet * (log_max - log_min)
+            scaled_bet = math.exp(scaled_log)
+
+            scaled_bet = min(max(scaled_bet, safe_min), safe_max)  # fix floating point issues
+
+            return to_exact_fraction(scaled_bet)
         # we squash both the action and the bet sizing and use the bet sizing as the slider between min and max bet
 
         if len(x.shape) == 1:

@@ -121,8 +121,9 @@ class PPO(OnPolicyAlgorithm):
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
-        batch_size = len(batch_states)
-        sgd_steps = max(self.sgd_steps, self.sgd_steps * batch_size / self.base_batch_size)
+        batch_size = len(batch_rewards)
+        sgd_steps = max(self.sgd_steps, self.sgd_steps * batch_size // self.base_batch_size)
+        # print(sgd_steps)
         if isinstance(batch_rewards[0], torch.Tensor):
             batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
         else:
