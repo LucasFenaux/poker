@@ -338,7 +338,15 @@ class CasinoManager:
         os.makedirs(self.player_save_folder, exist_ok=True)
         self.log_folder = os.path.join(save_folder, "logs")
         self.mode = "beta"
+
+        # player trackers
         self.is_playing = {player_id: False for player_id in self.player_ids}
+        self.is_training = {player_id: False for player_id in self.player_ids}
+        self.is_playing_against = {player_id: [] for player_id in self.player_ids}
+        self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
+        self.timeout_threshold = 3600  # 2 minutes (adjust based on how long a normal game/training takes)
+        self.last_timeout_check = time.time()
+
         # we spin up the player models
         self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                         self.player_ids]
@@ -346,7 +354,8 @@ class CasinoManager:
 
         self.table_max_size = 2
         self.table_min_size = 2
-        self.batch_size = 5000 if RESOURCE_LIMITED else 20000
+        self.batch_size = 5000 if RESOURCE_LIMITED else 10000
+        # self.batch_size = 10000
         self.on_policy = True
 
         # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
@@ -397,6 +406,35 @@ class CasinoManager:
         assert free_cpus > 0, (f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
                                                 f"requested.")
 
+    def rescue_ghost_players(self):
+        """Periodically checks for players stuck in a playing or training state."""
+        current_time = time.time()
+
+        # Only run this check every 5 seconds to save CPU
+        if current_time - self.last_timeout_check < 5.0:
+            return
+
+        self.last_timeout_check = current_time
+
+        for p_id in self.player_ids:
+            # If the player is currently out in the wild...
+            if self.is_playing[p_id] or self.is_training[p_id]:
+                # ...and they've been gone longer than our threshold...
+                if current_time - self.player_dispatch_times[p_id] > self.timeout_threshold:
+                    state = "TRAINING" if self.is_training[p_id] else "PLAYING"
+                    print(f"👻 [TIMEOUT MONITOR] Rescuing ghost player {p_id} stuck in {state} state!")
+
+                    # 1. Clear their flags
+                    self.is_playing[p_id] = False
+                    self.is_training[p_id] = False
+                    self.is_playing_against[p_id] = []
+
+                    # 2. Put them safely back into the table scheduler pool
+                    self.table_scheduler.add(p_id)
+
+                    # 3. Reset their stopwatch
+                    self.player_dispatch_times[p_id] = current_time
+
     def receive_from_trainer_queue(self):
         queue_empty = False
         try:
@@ -421,6 +459,7 @@ class CasinoManager:
                     # add the player to the table scheduler
                     if not self.is_playing[player_id]:
                         self.table_scheduler.add(player_id)
+                    self.is_training[player_id] = False
                 else:
                     # They STILL have enough data to train again!
                     # Send them straight back to the training queue.
@@ -435,6 +474,8 @@ class CasinoManager:
                         "player_training_count": self.player_training_counts[player_id]
                     }
                     self.trainer_send_queue.put_nowait(trainer_data)
+                    self.is_training[player_id] = True
+                    self.player_dispatch_times[player_id] = time.time()
 
             elif message["type"] == "termination":
                 trainer_id = message["trainer_id"]
@@ -484,7 +525,9 @@ class CasinoManager:
                     self.data_storage.add(player_id, hand_info)
 
                 # send the player_winnings to the leaderboard
-                self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids)))
+                self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
+                                                   self.is_playing, self.is_training, self.is_playing_against,
+                                                   self.player_dispatch_times))
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
@@ -492,6 +535,7 @@ class CasinoManager:
                 self.table_scheduler.update_weights(player_id, other_players)
 
                 self.is_playing[player_id] = False  # Mark them as free!
+                self.is_playing_against[player_id] = []
                 if self.data_storage.can_train(player_id):
                     batch = self.data_storage.get_batch(player_id)
                     batch_ref = ray.put(batch)
@@ -504,6 +548,8 @@ class CasinoManager:
                         "player_training_count": self.player_training_counts[player_id]
                     }
                     self.trainer_send_queue.put_nowait(trainer_data)
+                    self.is_training[player_id] = True
+                    self.player_dispatch_times[player_id] = time.time()
                 else:
                     # send them to play more games
                     self.table_scheduler.add(player_id)
@@ -538,59 +584,12 @@ class CasinoManager:
 
     def start_casino(self):
         print(f"Casino Starting")
-        # initialize the casino by putting all the players into the table queue
-        # no need to put players in the table queue, the new table scheduler will spin up games as we query it
-
-        # players_left = [player_id for player_id in self.player_ids]
-        # num_players_left = len(players_left)
-        # while num_players_left > 0:
-        #     if num_players_left <= self.table_max_size:
-        #         # last table, we start it and move on
-        #         table_size = num_players_left
-        #         last_table = True
-        #     else:
-        #         table_size = random.randint(self.table_min_size, self.table_max_size)
-        #         if num_players_left - table_size < self.table_min_size:
-        #             table_size = num_players_left - self.table_min_size
-        #         last_table = False
-        #     # print(num_players_left)
-        #     # pick the players
-        #     if last_table:
-        #         player_ids = players_left
-        #     else:
-        #         player_ids = random.sample(players_left, table_size)
-        #
-        #     # update the players left
-        #     players_left = [player for player in players_left if player not in player_ids]
-        #     num_players_left = len(players_left)
-        #
-        #     small_blind = 1  # we only deal with relative values anyways
-        #     big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-        #     # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
-        #     bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-        #     starting_stacks = bb_starting_stacks * big_blind
-        #     table_params = {
-        #         "raw_blinds_or_straddles": (small_blind, big_blind),
-        #         "min_bet": big_blind,
-        #         "raw_starting_stacks": starting_stacks,
-        #         "player_count": table_size
-        #     }
-        #
-        #     # gather the player's parameters and send it all
-        #     data = {
-        #         "type": "players",
-        #         "player_ids": player_ids,
-        #         "player_refs": [self.players[player_id] for player_id in player_ids],
-        #         "player_versions": [self.player_training_counts[p_id] for p_id in player_ids],
-        #         "table_params": table_params
-        #     }
-        #     self.table_send_queue.put_nowait(data)
-        #     # update the player statuses
-        #     for p_id in player_ids:
-        #         self.is_playing[p_id] = True
 
         while (not self.stop_event.is_set()):   # keep running the casino forever
             # casino main loop
+            # Step 0: timeout check (safety measure)
+            self.rescue_ghost_players()
+
             # Step 1: Receive from our trainer queue
             queue_empty_1 = self.receive_from_trainer_queue()
 
@@ -627,7 +626,8 @@ class CasinoManager:
                 # update player status to playing
                 for p_id in player_ids:
                     self.is_playing[p_id] = True
-
+                    self.is_playing_against[p_id] = [player_id for player_id in player_ids if player_id != p_id]
+                    self.player_dispatch_times[p_id] = time.time()
                 player_ids = self.table_scheduler.get_table()
 
         print("Casino cleaning up and shutting down...")

@@ -136,8 +136,8 @@ class TableActor:
             max_bet = min_bet  # Or some other logical fallback
 
         interpreted_action, bet_sizing = self.action_interpreter(player_action, min_bet, max_bet)
-        if self.num_games_played < 1:
-            print(player_action[0].item(), interpreted_action)
+        # if self.num_games_played < 1:
+            # print(player_action[0].item(), interpreted_action)
 
         if interpreted_action == Action.CHECK_OR_FOLD:
             if state.can_check_or_call() and state.checking_or_calling_amount == 0:
@@ -203,6 +203,7 @@ class TableActor:
                     player_action = player_action_tensor.detach().cpu()
             except Exception as e:
                 # print(state)
+                print("tree_level", e)
                 raise e
 
             # we log the state and action for player training
@@ -334,7 +335,7 @@ class TableActor:
             return False
         except Exception as e:
             # raise e
-            print(f"Exception: {e} encountered in Table {self.table_id}")
+            print(f"Exception: {e} encountered in Table {self.table_id} in tree round fn")
             return True
 
     def _play_linear_round(self):
@@ -367,7 +368,7 @@ class TableActor:
                         player_action_tensor = player.get_action((snapshot, current_actor))
                         player_action = player_action_tensor.detach().cpu()
                 except Exception as e:
-                    print(state)
+                    print("linear_round", state)
                     raise e
 
                 # we log the state and action for player training
@@ -429,7 +430,7 @@ class TableActor:
             return False
 
         except Exception as e:
-            print(f"Exception: {e} encountered in Table {self.table_id}")
+            print(f"Exception: {e} encountered in Table {self.table_id} in linear round fn")
             return True  # terminate the table to avoid players from getting stuck in the void
 
     def play_game(self):
@@ -454,7 +455,7 @@ class TableActor:
             return True
 
         except Exception as e:
-            print(f"Exception: {e} encountered in Table {self.table_id}")
+            print(f"Exception: {e} encountered in Table {self.table_id} in play game fn")
             return False
 
     def start(self):
@@ -477,9 +478,11 @@ class TableActor:
                         return True
                 # otherwise, we are good to go
                 assert data["type"] == "players"
-                players, player_ids = ray.get(data["player_refs"]), data["player_ids"]
-                try:
 
+                player_ids = data["player_ids"]
+
+                try:
+                    players = ray.get(data["player_refs"])
                     self.current_player_versions = data["player_versions"]
 
                     player_params_list = [player.get_params() for player in players]
@@ -538,7 +541,7 @@ class TableActor:
                     self.out_queue.put_nowait_batch(batch)
 
                 except Exception as e:
-                    print(f"Exception: {e} encountered in Table {self.table_id}")
+                    print(f"Exception: {e} encountered in Table {self.table_id} in start fn")
                     batch = []
 
                     # now we send back the players
@@ -547,6 +550,6 @@ class TableActor:
                             "type": "player",
                             "table_id": self.table_id,
                             "player_id": player_id,
-                            "other_players": player_ids   # we have safety logic that prevents a weight with itself
+                            "other_players": None   # we have safety logic that prevents a weight with itself
                         })
                     self.out_queue.put_nowait_batch(batch)
