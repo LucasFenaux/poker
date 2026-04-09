@@ -15,6 +15,8 @@ from src.trainer_actor import TrainerActor
 from src.table_actor import TableActor
 from src.leaderboard_actor import LeaderboardActor
 import math
+from torch.utils.tensorboard import SummaryWriter
+from src.utils import SemanticTimer
 
 
 class PlayerAI:
@@ -53,6 +55,16 @@ class DataStorage:
         self.actions = {player_id: [] for player_id in self.player_ids}
         self.sample_weights = {player_id: [] for player_id in self.player_ids}
         self.on_policy = on_policy
+
+    def old_add(self, player_id, hand_info_ref):
+        # TODO: remove once the new one is proven to work
+        hand_info: dict[str, Any] = ray.get(hand_info_ref)
+        self.states[player_id].extend(hand_info["states"])
+        self.rewards[player_id].extend(hand_info["rewards"])
+        self.current_actors[player_id].extend(hand_info["current_actors"])
+        self.actions[player_id].extend(hand_info["actions"])
+        self.sample_weights[player_id].extend(hand_info["sample_weights"])
+        return self.can_train(player_id)
 
     def add(self, player_id, hand_info_ref):
         hand_info: dict[str, Any] = ray.get(hand_info_ref)
@@ -339,6 +351,11 @@ class CasinoManager:
         self.log_folder = os.path.join(save_folder, "logs")
         self.mode = "beta"
 
+        manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
+        self.writer = SummaryWriter(log_dir=manager_log_path)
+        self.timer = SemanticTimer()
+        self.loop_step = 0
+
         # player trackers
         self.is_playing = {player_id: False for player_id in self.player_ids}
         self.is_training = {player_id: False for player_id in self.player_ids}
@@ -373,7 +390,7 @@ class CasinoManager:
         self.table_ids = [table_id for table_id in range(NUM_TABLES)]
         self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                          self.table_max_size, discrete, self.mode,
-                                         self.batch_size) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+                                         self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
         for table in self.tables:
             table.start.remote()
 
@@ -396,10 +413,10 @@ class CasinoManager:
 
         self.discrete = discrete
         # min and max stack params are defined in terms of # of big blinds
-        self.min_stack = 50
-        self.max_stack = 500
-        self.min_bb_ratio = 1
-        self.max_bb_ratio = 5
+        self.min_stack = 100
+        self.max_stack = 100
+        self.min_bb_ratio = 2
+        self.max_bb_ratio = 2
         self.min_allowed_start_bb = 10
         self.stop_event = threading.Event()
 
@@ -580,6 +597,77 @@ class CasinoManager:
             return queue_empty
 
     def start_casino(self):
+        print(f"Casino Starting")
+
+        while (not self.stop_event.is_set()):  # keep running the casino forever
+            with self.timer.time("Manager_Total_Loop_Time"):
+
+                with self.timer.time("1_Rescue_Ghost_Players"):
+                    self.rescue_ghost_players()
+
+                activity_this_loop = False
+
+                with self.timer.time("2_Drain_Trainer_Queue"):
+                    while True:
+                        queue_empty_1 = self.receive_from_trainer_queue()
+                        if queue_empty_1:
+                            break
+                        activity_this_loop = True
+
+                with self.timer.time("3_Drain_Table_Queue"):
+                    while True:
+                        queue_empty_2 = self.receive_from_table_queue()
+                        if queue_empty_2:
+                            break
+                        activity_this_loop = True
+
+                with self.timer.time("4_Table_Scheduler"):
+                    player_ids = self.table_scheduler.get_table()
+                    while player_ids is not None:
+                        activity_this_loop = True
+                        table_size = len(list(player_ids))
+
+                        small_blind = 1
+                        big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
+                        bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
+                        starting_stacks = bb_starting_stacks * big_blind
+
+                        table_params = {
+                            "raw_blinds_or_straddles": (small_blind, big_blind),
+                            "min_bet": big_blind,
+                            "raw_starting_stacks": starting_stacks,
+                            "player_count": table_size
+                        }
+
+                        data = {
+                            "type": "players",
+                            "player_ids": player_ids,
+                            "player_refs": [self.players[player_id] for player_id in player_ids],
+                            "player_versions": [self.player_training_counts[p_id] for p_id in player_ids],
+                            "table_params": table_params
+                        }
+                        self.table_send_queue.put_nowait(data)
+
+                        for p_id in player_ids:
+                            self.is_playing[p_id] = True
+                            self.is_playing_against[p_id] = [player_id for player_id in player_ids if player_id != p_id]
+                            self.player_dispatch_times[p_id] = time.time()
+
+                        player_ids = self.table_scheduler.get_table()
+
+                with self.timer.time("5_Sleep_Backoff"):
+                    if not activity_this_loop:
+                        time.sleep(1e-6)
+
+            self.loop_step += 1
+            if self.loop_step % 10000 == 0:
+                self.timer.log_to_tensorboard(self.writer, "Manager", self.loop_step)
+                self.timer.reset()
+                # self.loop_step = 1  # to prevent it from blowing up to the moon
+
+        print("Casino cleaning up and shutting down...")
+
+    def old_start_casino(self):
         print(f"Casino Starting")
 
         while (not self.stop_event.is_set()):   # keep running the casino forever

@@ -3,13 +3,15 @@ from collections import deque
 import pokerkit
 import ray
 from ray.util.queue import Queue, Empty
+import os
+from torch.utils.tensorboard import SummaryWriter
 from pokerkit import NoLimitTexasHoldem, Automation
-from src.action_interpreter import ActionInterpreter, Action
-from src.state_interpreter import extract_state_snapshot
 import random
 import torch
+from src.action_interpreter import ActionInterpreter, Action
+from src.state_interpreter import extract_state_snapshot
 from src.alg import PPOInferenceWrapper, PPO
-
+from src.utils import SemanticTimer
 
 
 # @ray.remote(num_cpus=1)
@@ -26,7 +28,7 @@ class TableActor:
     }
 
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
-                 model_mode: str, batch_size: int):
+                 model_mode: str, batch_size: int, log_folder: str):
         # torch.set_num_threads(1)
 
         self.table_id = table_id
@@ -47,6 +49,10 @@ class TableActor:
         # for 3, we start throwing hands away 185 hands played if every player plays every street
         self.use_early_stopping = True
         self.batch_size = batch_size
+        self.log_folder = log_folder
+        log_path = os.path.join(self.log_folder, "tensorboard_logs")
+        self.writer = SummaryWriter(log_dir=log_path)
+        self.timer = SemanticTimer()
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
@@ -195,48 +201,51 @@ class TableActor:
         sample_weights = {player_id: [] for player_id in self.game_player_ids}
         rewards = {player_id: [] for player_id in self.game_player_ids}
 
-        while state.status and not state.can_deal_board():
-            # play this level until the next street
-            current_actor = state.actor_index
-            player = self.game_players[current_actor]
-            player_id = self.game_player_ids[current_actor]
-            snapshot = extract_state_snapshot(state, current_actor)
+        with self.timer.time("TreeLevel_Play_Street"):
+            while state.status and not state.can_deal_board():
+                # play this level until the next street
+                current_actor = state.actor_index
+                player = self.game_players[current_actor]
+                player_id = self.game_player_ids[current_actor]
+                snapshot = extract_state_snapshot(state, current_actor)
 
-            try:
-                with torch.no_grad():
-                    player_action_tensor = player.get_action((snapshot, current_actor))
-                    player_action = player_action_tensor.detach().cpu()
-            except Exception as e:
-                # print(state)
-                print("tree_level", e)
-                raise e
+                try:
+                    with torch.no_grad():
+                        player_action_tensor = player.get_action((snapshot, current_actor))
+                        player_action = player_action_tensor.detach().cpu()
+                except Exception as e:
+                    # print(state)
+                    print("tree_level", e)
+                    raise e
 
-            # we log the state and action for player training
-            snapshots[player_id].append(snapshot)
-            current_actors[player_id].append(current_actor)
-            player_actions[player_id].append(player_action)
-            sample_weights[player_id].append(1./(self.tree_expansion ** depth))
+                # we log the state and action for player training
+                snapshots[player_id].append(snapshot)
+                current_actors[player_id].append(current_actor)
+                player_actions[player_id].append(player_action)
+                sample_weights[player_id].append(1./(self.tree_expansion ** depth))
 
-            self._take_action(state, player_action)
+                self._take_action(state, player_action)
 
         if not state.status:
-            # we reached the last street level, we can compute the rewards
-            final_game_stacks = state.stacks[:]
-            expected_rewards = {}  # Store scalar expected values safely
-            for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
-                                                                            self.game_starting_stacks)):
-                reward = (final_game_stack - game_starting_stack) / (self.game_params["raw_blinds_or_straddles"][-1])
-                player_id = self.game_player_ids[i]
-                hand_rewards = [reward] * len(snapshots[player_id])
-                rewards[player_id] = hand_rewards
-                expected_rewards[player_id] = reward  # Safe scalar value
-            return snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards
+            with self.timer.time("TreeLevel_Compute_Rewards"):
+                # we reached the last street level, we can compute the rewards
+                final_game_stacks = state.stacks[:]
+                expected_rewards = {}  # Store scalar expected values safely
+                for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
+                                                                                self.game_starting_stacks)):
+                    reward = (final_game_stack - game_starting_stack) / (self.game_params["raw_blinds_or_straddles"][-1])
+                    player_id = self.game_player_ids[i]
+                    hand_rewards = [reward] * len(snapshots[player_id])
+                    rewards[player_id] = hand_rewards
+                    expected_rewards[player_id] = reward  # Safe scalar value
+                return snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards
 
         current_level_counts = {player_id: len(snapshots[player_id]) for player_id in self.game_player_ids}
-        # children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion - 1)]
-        pickle_state = pickle.dumps(state, protocol=-1)
-        children_states = [pickle.loads(pickle_state) for _ in range(self.tree_expansion - 1)]
-        children_states.append(state)  # Saves 1 expensive deepcopy per node
+
+        with self.timer.time("TreeLevel_State_Deepcopy"):
+            pickle_state = pickle.dumps(state, protocol=-1)
+            children_states = [pickle.loads(pickle_state) for _ in range(self.tree_expansion - 1)]
+            children_states.append(state)  # Saves 1 expensive deepcopy per node
 
         # we create the children
         # children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion)]
@@ -288,56 +297,59 @@ class TableActor:
                 raw_starting_stacks=self.game_starting_stacks,
                 **self.game_params
             )
-            snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards = self._play_tree_level(state, 0)
-            # for the reward to update the overarching game state (and leaderboard), we simply use the mean reward
-            # over all rollouts, which should be given to use by the first reward in the list for each player
-            busted_out = []
-            final_game_stacks = []
-            for i, player_id in enumerate(self.game_player_ids):
-                reward_in_bbs = expected_rewards[player_id]
-                chip_delta = reward_in_bbs * self.game_params["raw_blinds_or_straddles"][-1]
-                final_game_stack = self.game_starting_stacks[i] + chip_delta
-                final_game_stacks.append(final_game_stack)
+            with self.timer.time("TreeRound_Play_Level_Recursive"):
+                snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards = self._play_tree_level(state, 0)
 
-                self.hand_info[player_id]["states"].extend(snapshots[player_id])
-                self.hand_info[player_id]["current_actors"].extend(current_actors[player_id])
-                self.hand_info[player_id]["actions"].extend(player_actions[player_id])
-                self.hand_info[player_id]["rewards"].extend(rewards[player_id])
-                self.hand_info[player_id]["sample_weights"].extend(sample_weights[player_id])
+            with self.timer.time("TreeRound_Process_Bustouts"):
+                # for the reward to update the overarching game state (and leaderboard), we simply use the mean reward
+                # over all rollouts, which should be given to use by the first reward in the list for each player
+                busted_out = []
+                final_game_stacks = []
+                for i, player_id in enumerate(self.game_player_ids):
+                    reward_in_bbs = expected_rewards[player_id]
+                    chip_delta = reward_in_bbs * self.game_params["raw_blinds_or_straddles"][-1]
+                    final_game_stack = self.game_starting_stacks[i] + chip_delta
+                    final_game_stacks.append(final_game_stack)
 
-                if final_game_stack < self.game_params["min_bet"]:
-                    # player is busted out
-                    # update game view to remove the busted out player
-                    busted_out.append(i)
+                    self.hand_info[player_id]["states"].extend(snapshots[player_id])
+                    self.hand_info[player_id]["current_actors"].extend(current_actors[player_id])
+                    self.hand_info[player_id]["actions"].extend(player_actions[player_id])
+                    self.hand_info[player_id]["rewards"].extend(rewards[player_id])
+                    self.hand_info[player_id]["sample_weights"].extend(sample_weights[player_id])
 
-            busted_out.sort(reverse=True)   # bust from largest index to lowest index so we don't change indices as we bust
+                    if final_game_stack < self.game_params["min_bet"]:
+                        # player is busted out
+                        # update game view to remove the busted out player
+                        busted_out.append(i)
 
-            for i in busted_out:
-                player_id = self.game_player_ids[i]
+                busted_out.sort(reverse=True)   # bust from largest index to lowest index so we don't change indices as we bust
 
-                j = self.player_ids.index(player_id)
-                self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
+                for i in busted_out:
+                    player_id = self.game_player_ids[i]
 
-                final_game_stacks.pop(i)
-                self.game_players.pop(i)
-                self.game_starting_stacks.pop(i)
-                self.game_player_ids.pop(i)
+                    j = self.player_ids.index(player_id)
+                    self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
 
-                self.game_params["player_count"] = len(self.game_player_ids)
+                    final_game_stacks.pop(i)
+                    self.game_players.pop(i)
+                    self.game_starting_stacks.pop(i)
+                    self.game_player_ids.pop(i)
 
-            self.game_starting_stacks = final_game_stacks
+                    self.game_params["player_count"] = len(self.game_player_ids)
 
-            # Keep track of if the current button busted
-            button_busted = (0 in busted_out)
+                self.game_starting_stacks = final_game_stacks
 
-            if self.game_params["player_count"] < 2:
-                return True
+                # Keep track of if the current button busted
+                button_busted = (0 in busted_out)
 
-            if not button_busted:
-                # rotate the spots
-                self.game_players.append(self.game_players.pop(0))
-                self.game_player_ids.append(self.game_player_ids.pop(0))
-                self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
+                if self.game_params["player_count"] < 2:
+                    return True
+
+                if not button_busted:
+                    # rotate the spots
+                    self.game_players.append(self.game_players.pop(0))
+                    self.game_player_ids.append(self.game_player_ids.pop(0))
+                    self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
 
             return False
         except Exception as e:
@@ -442,33 +454,39 @@ class TableActor:
 
     def play_game(self):
         try:
-            done = False
-            counter = 0
-            while not done:
-                done = self._play_round()
-                self._reset_current_hand()
-                counter += 1
+            self.timer.reset()  # Reset the timer at the start of a fresh game
+            with self.timer.time("Game_Total_Duration"):
+                done = False
+                counter = 0
+                while not done:
+                    with self.timer.time("Game_Play_Round"):
+                        done = self._play_round()
+                    self._reset_current_hand()
+                    counter += 1
 
-                if self.use_early_stopping and not done:
-                    # early stopping is useful with the timeout, as otherwise really long game could potentially timeout
-                    early_stopping = False
-                    for player_id in self.game_player_ids:
-                        if len(self.hand_info[player_id]["rewards"]) > self.batch_size:
-                            done = True
-                            early_stopping = True
-                    if early_stopping:
-                        print(f"Early stopping on Table {self.table_id}, reached batch size limit of {self.batch_size}")
+                    if self.use_early_stopping and not done:
+                        # early stopping is useful with the timeout, as otherwise really long game could potentially timeout
+                        early_stopping = False
+                        for player_id in self.game_player_ids:
+                            if len(self.hand_info[player_id]["rewards"]) > self.batch_size:
+                                done = True
+                                early_stopping = True
+                        if early_stopping:
+                            print(f"Early stopping on Table {self.table_id}, reached batch size limit of {self.batch_size}")
 
-                # if counter % 100 == 0:
-            # print(self.table_id, self.num_games_played+1, counter)
-            # need to save the remaining player's winnings
-            # update player winnings
-            for i, player_id in enumerate(self.game_player_ids):
-                # we need the index of the player id in the original starting stack list
-                j = self.player_ids.index(player_id)
-                self.player_winnings[player_id] += self.game_starting_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
+                    # if counter % 100 == 0:
+                # print(self.table_id, self.num_games_played+1, counter)
+                # need to save the remaining player's winnings
+                # update player winnings
+                for i, player_id in enumerate(self.game_player_ids):
+                    # we need the index of the player id in the original starting stack list
+                    j = self.player_ids.index(player_id)
+                    self.player_winnings[player_id] += self.game_starting_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
 
             self.num_games_played += 1
+
+            self.timer.log_to_tensorboard(self.writer, self.table_id, self.num_games_played)
+
             return True
 
         except Exception as e:
