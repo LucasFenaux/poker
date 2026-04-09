@@ -1,4 +1,4 @@
-import copy
+import pickle
 from collections import deque
 import pokerkit
 import ray
@@ -25,7 +25,10 @@ class TableActor:
         "mode": "tree"
     }
 
-    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool, model_mode: str):
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
+                 model_mode: str, batch_size: int):
+        # torch.set_num_threads(1)
+
         self.table_id = table_id
         self.in_queue = in_queue
         self.out_queue = out_queue
@@ -42,6 +45,8 @@ class TableActor:
         self.replay = 1
         self.tree_expansion = 5   # since most games last longer than 40 hands, if we use 5 then we throw away a ton of data
         # for 3, we start throwing hands away 185 hands played if every player plays every street
+        self.use_early_stopping = True
+        self.batch_size = batch_size
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
@@ -228,7 +233,9 @@ class TableActor:
             return snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards
 
         current_level_counts = {player_id: len(snapshots[player_id]) for player_id in self.game_player_ids}
-        children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion - 1)]
+        # children_states = [copy.deepcopy(state) for _ in range(self.tree_expansion - 1)]
+        pickle_state = pickle.dumps(state, protocol=-1)
+        children_states = [pickle.loads(pickle_state) for _ in range(self.tree_expansion - 1)]
         children_states.append(state)  # Saves 1 expensive deepcopy per node
 
         # we create the children
@@ -439,9 +446,19 @@ class TableActor:
             counter = 0
             while not done:
                 done = self._play_round()
-
                 self._reset_current_hand()
                 counter += 1
+
+                if self.use_early_stopping and not done:
+                    # early stopping is useful with the timeout, as otherwise really long game could potentially timeout
+                    early_stopping = False
+                    for player_id in self.game_player_ids:
+                        if len(self.hand_info[player_id]["rewards"]) > self.batch_size:
+                            done = True
+                            early_stopping = True
+                    if early_stopping:
+                        print(f"Early stopping on Table {self.table_id}, reached batch size limit of {self.batch_size}")
+
                 # if counter % 100 == 0:
             # print(self.table_id, self.num_games_played+1, counter)
             # need to save the remaining player's winnings

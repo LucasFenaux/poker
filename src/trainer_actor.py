@@ -6,11 +6,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.alg import PPO
 
-
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=4)
 class TrainerActor:
     def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
                  player_save_folder: str, mode: str) -> None:
+        torch.set_num_threads(4)
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue

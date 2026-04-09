@@ -344,7 +344,7 @@ class CasinoManager:
         self.is_training = {player_id: False for player_id in self.player_ids}
         self.is_playing_against = {player_id: [] for player_id in self.player_ids}
         self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
-        self.timeout_threshold = 3600  # 2 minutes (adjust based on how long a normal game/training takes)
+        self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
         self.last_timeout_check = time.time()
 
         # we spin up the player models
@@ -354,7 +354,7 @@ class CasinoManager:
 
         self.table_max_size = 2
         self.table_min_size = 2
-        self.batch_size = 5000 if RESOURCE_LIMITED else 10000
+        self.batch_size = 5000 if RESOURCE_LIMITED else 100_000
         # self.batch_size = 10000
         self.on_policy = True
 
@@ -372,7 +372,8 @@ class CasinoManager:
               f"{self.table_max_size}...")
         self.table_ids = [table_id for table_id in range(NUM_TABLES)]
         self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
-                                         self.table_max_size, discrete, self.mode) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+                                         self.table_max_size, discrete, self.mode,
+                                         self.batch_size) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
         for table in self.tables:
             table.start.remote()
 
@@ -401,10 +402,6 @@ class CasinoManager:
         self.max_bb_ratio = 5
         self.min_allowed_start_bb = 10
         self.stop_event = threading.Event()
-        available = ray.available_resources()
-        free_cpus = available.get('CPU', 0)
-        assert free_cpus > 0, (f"Only {free_cpus} CPUs are available whereas {NUM_TRAINERS} are "
-                                                f"requested.")
 
     def rescue_ghost_players(self):
         """Periodically checks for players stuck in a playing or training state."""
@@ -572,7 +569,7 @@ class CasinoManager:
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
                 new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
-                                      self.table_max_size, self.discrete, self.mode)
+                                      self.table_max_size, self.discrete, self.mode, self.batch_size)
                 self.tables.append(new_table)
                 new_table.start.remote()
             else:
@@ -635,9 +632,12 @@ class CasinoManager:
     def start(self):
         try:
             self.start_casino()
-        except KeyboardInterrupt as e:
-            print("Casino terminated")
-            raise e
+        except (Exception, KeyboardInterrupt) as e:
+            if isinstance(e, KeyboardInterrupt):
+                print("Casino terminated")
+            else:
+                print(f"Casino error: {e}")
+            return
         finally:
             # tell the casino to shut down
             self.stop_event.set()

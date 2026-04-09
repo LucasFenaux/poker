@@ -72,8 +72,10 @@ class PokerModel(nn.Module):
             dist = Normal(mu, std)
             return dist
 
-    def forward(self, state: Union[pokerkit.State, StateSnapshot, list], current_actor: Union[int, list[int]]):
-        if isinstance(state, (pokerkit.State, StateSnapshot)) and isinstance(current_actor, int):
+    def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor], current_actor: Union[int, list[int]]=None):
+        if isinstance(state, torch.Tensor) and current_actor is None:
+            feature_vector = state
+        elif isinstance(state, (pokerkit.State, StateSnapshot)) and isinstance(current_actor, int):
             feature_vector = self.interpreter(state, current_actor)
         elif isinstance(state, list) and isinstance(current_actor, list):
             feature_vector = []
@@ -106,8 +108,11 @@ class ValueModel(nn.Module):
     def _forward(self, feature_vector: torch.Tensor):
         return self.net(feature_vector)
 
-    def forward(self, state: Union[pokerkit.State, StateSnapshot, list], current_actor: Union[int, list[int]]):
-        if isinstance(state, (pokerkit.State, StateSnapshot)) and isinstance(current_actor, int):
+    def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor], current_actor: Union[int, list[int]]=None):
+        if isinstance(state, torch.Tensor) and current_actor is None:
+            # feature vector has been precomputed
+            feature_vector = state
+        elif isinstance(state, (pokerkit.State, StateSnapshot)) and isinstance(current_actor, int):
             feature_vector = self.interpreter(state, current_actor)
         elif isinstance(state, list) and isinstance(current_actor, list):
             feature_vector = []
@@ -115,7 +120,7 @@ class ValueModel(nn.Module):
                 feature_vector.append(self.interpreter(state, c_a))
             feature_vector = torch.stack(feature_vector)
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"{type(state)}, {type(current_actor)} is not implemented and")
 
         return self._forward(feature_vector)
 
