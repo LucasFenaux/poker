@@ -49,81 +49,33 @@ class DataStorage:
         # self.out_queue = out_queue
         self.player_ids = player_ids
         self.batch_size = batch_size
-        self.states = {player_id: [] for player_id in self.player_ids}
-        self.current_actors = {player_id: [] for player_id in self.player_ids}
-        self.rewards = {player_id: [] for player_id in self.player_ids}
-        self.actions = {player_id: [] for player_id in self.player_ids}
-        self.sample_weights = {player_id: [] for player_id in self.player_ids}
+        # self.states = {player_id: [] for player_id in self.player_ids}
+        # self.current_actors = {player_id: [] for player_id in self.player_ids}
+        # self.rewards = {player_id: [] for player_id in self.player_ids}
+        # self.actions = {player_id: [] for player_id in self.player_ids}
+        # self.sample_weights = {player_id: [] for player_id in self.player_ids}
+        self.num_samples = {player_id: 0 for player_id in player_ids}
+        self.samples = {player_id: [] for player_id in player_ids}
         self.on_policy = on_policy
 
-    def old_add(self, player_id, hand_info_ref):
-        # TODO: remove once the new one is proven to work
-        hand_info: dict[str, Any] = ray.get(hand_info_ref)
-        self.states[player_id].extend(hand_info["states"])
-        self.rewards[player_id].extend(hand_info["rewards"])
-        self.current_actors[player_id].extend(hand_info["current_actors"])
-        self.actions[player_id].extend(hand_info["actions"])
-        self.sample_weights[player_id].extend(hand_info["sample_weights"])
-        return self.can_train(player_id)
-
-    def add(self, player_id, hand_info_ref):
-        hand_info: dict[str, Any] = ray.get(hand_info_ref)
-        self.states[player_id].extend(hand_info["states"])
-        self.rewards[player_id].extend(hand_info["rewards"])
-        self.current_actors[player_id].extend(hand_info["current_actors"])
-        self.actions[player_id].extend(hand_info["actions"])
-        self.sample_weights[player_id].extend(hand_info["sample_weights"])
+    def add(self, player_id, hand_info_ref, num_samples):
+        self.num_samples[player_id] += num_samples
+        self.samples[player_id].append(hand_info_ref)
         return self.can_train(player_id)
 
     def can_train(self, player_id):
-        if len(self.states[player_id]) >= self.batch_size:
+        if self.num_samples[player_id] >= self.batch_size:
             return True  # can train
 
         return False
 
     def get_batch(self, player_id):
-        assert len(self.states[player_id]) >= self.batch_size
-        assert len(self.rewards[player_id]) >= self.batch_size
-        assert len(self.actions[player_id]) >= self.batch_size
-        assert len(self.current_actors[player_id]) >= self.batch_size
-        assert len(self.sample_weights[player_id]) >= self.batch_size
-
-        assert not RESOURCE_LIMITED, f"RESOURCE LIMITED {RESOURCE_LIMITED}"
-        # print(RESOURCE_LIMITED)
-        # since we are gonna train on the data, if we have a ONPolicy alg, we need to get rid of the extra
-        # unless we are not resource limited in which case we send everything
-        if RESOURCE_LIMITED:
-            states = self.states[player_id][:self.batch_size]
-            current_actors = self.current_actors[player_id][:self.batch_size]
-            rewards = self.rewards[player_id][:self.batch_size]
-            actions = self.actions[player_id][:self.batch_size]
-            sample_weights = self.sample_weights[player_id][:self.batch_size]
-        else:
-            states = self.states[player_id]
-            current_actors = self.current_actors[player_id]
-            rewards = self.rewards[player_id]
-            actions = self.actions[player_id]
-            sample_weights = self.sample_weights[player_id]
-
-        if self.on_policy or not RESOURCE_LIMITED:
-            self.states[player_id] = []
-            self.current_actors[player_id] = []
-            self.rewards[player_id] = []
-            self.actions[player_id] = []
-            self.sample_weights[player_id] = []
-        else:
-            self.states[player_id] = self.states[player_id][self.batch_size:]
-            self.current_actors[player_id] = self.current_actors[player_id][self.batch_size:]
-            self.rewards[player_id] = self.rewards[player_id][self.batch_size:]
-            self.actions[player_id] = self.actions[player_id][self.batch_size:]
-            self.sample_weights[player_id] = self.sample_weights[player_id][self.batch_size:]
-
-        return {
-            "states": (states, current_actors),
-            "rewards": rewards,
-            "actions": actions,
-            "sample_weights": sample_weights,
-        }
+        assert self.num_samples[player_id] >= self.batch_size
+        samples = self.samples[player_id]
+        self.samples[player_id] = []
+        self.num_samples[player_id] = 0
+        # let the trainer handle extra data
+        return samples, self.num_samples[player_id]
 
 
 class JITTableScheduler:
@@ -463,6 +415,8 @@ class CasinoManager:
             if message["type"] == "player":
                 player_id, new_weights, new_optimizer_params = message["player_id"], message["new_weights"], message["new_optimizer_params"]
                 # update that player's model weights
+                # TODO: change to get the playerAI directly from the Trainer rather than having to load the player and then put it back. Could also check how much time it actually takes to see if it's worth the implementation effort
+
                 player: PlayerAI = ray.get(self.players[player_id])
                 player.load_params(new_weights)
                 player.load_optimizers(new_optimizer_params)
@@ -477,13 +431,14 @@ class CasinoManager:
                 else:
                     # They STILL have enough data to train again!
                     # Send them straight back to the training queue.
-                    batch = self.data_storage.get_batch(player_id)
-                    batch_ref = ray.put(batch)
-
+                    # batch = self.data_storage.get_batch(player_id)
+                    # batch_ref = ray.put(batch)
+                    batch_ref, num_samples = self.data_storage.get_batch(player_id)
                     trainer_data = {
                         "type": "player",
                         "player_id": player_id,
                         "batch_ref": batch_ref,
+                        "num_samples": num_samples,
                         "player_ref": self.players[player_id],
                         "player_training_count": self.player_training_counts[player_id]
                     }
@@ -532,11 +487,11 @@ class CasinoManager:
 
                 hand_info, player_winnings = data["hand_info"], data["player_winnings"]
                 data_version = data["version"]
-
+                num_samples = data["num_samples"]
                 if data_version == self.player_training_counts[player_id]:
                     # Only add data from the same model version as the current one
 
-                    self.data_storage.add(player_id, hand_info)
+                    self.data_storage.add(player_id, hand_info, num_samples)
 
                 # send the player_winnings to the leaderboard
                 self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
@@ -551,13 +506,16 @@ class CasinoManager:
                 self.is_playing[player_id] = False  # Mark them as free!
                 self.is_playing_against[player_id] = []
                 if self.data_storage.can_train(player_id):
-                    batch = self.data_storage.get_batch(player_id)
-                    batch_ref = ray.put(batch)
+                    # batch = self.data_storage.get_batch(player_id)
+                    # batch_ref = ray.put(batch)
+
+                    batch_ref, num_samples = self.data_storage.get_batch(player_id)
 
                     trainer_data = {
                         "type": "player",
                         "player_id": player_id,
                         "batch_ref": batch_ref,
+                        "num_samples": num_samples,
                         "player_ref": self.players[player_id],
                         "player_training_count": self.player_training_counts[player_id]
                     }

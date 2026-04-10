@@ -112,7 +112,30 @@ class TrainerActor:
 
             try:
                 player = ray.get(data["player_ref"])
-                batch = ray.get(data["batch_ref"])
+                num_samples = data["num_samples"]
+
+                states = []
+                rewards = []
+                actions = []
+                sample_weights = []
+                current_actors = []
+
+                # parse the batch data
+                sub_batches = ray.get(data["batch_ref"])
+                for sub_batch in sub_batches:
+                    states.extend(sub_batch["states"])
+                    rewards.extend(sub_batch["rewards"])
+                    actions.extend(sub_batch["actions"])
+                    sample_weights.extend(sub_batch["sample_weights"])
+                    current_actors.extend(sub_batch["current_actors"])
+
+                batch = {
+                    "states": (states, current_actors),
+                    "rewards": rewards,
+                    "actions": actions,
+                    "sample_weights": sample_weights,
+                }
+                # batch = ray.get(data["batch_ref"])
                 player_training_count = data["player_training_count"]
 
                 params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
