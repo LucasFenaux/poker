@@ -4,7 +4,7 @@ import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
 
-from src.alg import PPO
+from src.ppo_self_play.alg import PPO
 
 @ray.remote(num_cpus=1)
 class TrainerActor:

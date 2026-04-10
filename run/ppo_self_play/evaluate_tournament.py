@@ -4,13 +4,12 @@ import argparse
 import random
 import time
 import torch
-import numpy as np
 from pokerkit import NoLimitTexasHoldem, Automation
 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import ActionInterpreter, Action
-from src.alg import PPO, PPOInferenceWrapper
+from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
 from evaluate import get_latest_run_folder
 
 

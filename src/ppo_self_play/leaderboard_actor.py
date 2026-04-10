@@ -4,7 +4,7 @@ import json
 import os
 import asyncio
 from fractions import Fraction
-from src.global_settings import NUM_TRAINERS, NUM_TABLES, MAX_TABLE_SIZE
+from src.ppo_self_play.global_settings import NUM_TRAINERS, NUM_TABLES
 
 
 class PokerEncoder(json.JSONEncoder):

@@ -10,7 +10,7 @@ from pokerkit import NoLimitTexasHoldem, Automation, State, calculate_equities, 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import ActionInterpreter, Action
-from src.alg import PPO, PPOInferenceWrapper
+from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
 
 
 # --- 1. Baseline Bot Logic ---

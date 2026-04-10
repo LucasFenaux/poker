@@ -4,7 +4,7 @@ import torch
 from datetime import datetime
 import uuid
 
-from src.casino_manager import CasinoManager
+from src.ppo_self_play.casino_manager import CasinoManager
 
 
 def get_save_folder(base_path="results"):

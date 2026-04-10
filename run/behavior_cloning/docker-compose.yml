@@ -1,0 +1,15 @@
+services:
+  data-generator:
+    build:
+      # Set the build context to the root of your repository
+      context: ../../
+      # Tell Docker where to find the Dockerfile relative to that context
+      dockerfile: run/behavior_cloning/Dockerfile
+    # IMPORTANT: Ray needs a larger shared memory size (/dev/shm) to function in Docker.
+    # 2gb is usually a safe starting point, but you can increase it if Ray throws memory errors.
+    shm_size: '8gb'
+    volumes:
+      # Map the data folder from your root directory to the container
+      - ../../data:/app/data
+    environment:
+      - RAY_NUM_CPUS=10

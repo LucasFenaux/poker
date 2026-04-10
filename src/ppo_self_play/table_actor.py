@@ -10,8 +10,8 @@ import random
 import torch
 from src.action_interpreter import ActionInterpreter, Action
 from src.state_interpreter import extract_state_snapshot
-from src.alg import PPOInferenceWrapper, PPO
-from src.utils import SemanticTimer
+from src.ppo_self_play.alg import PPOInferenceWrapper, PPO
+from src.shared import SemanticTimer
 
 
 # @ray.remote(num_cpus=1)
@@ -22,7 +22,7 @@ class TableActor:
         "raw_antes": 0,
         "raw_blinds_or_straddles": (1, 2),
         "min_bet": 2,
-        "raw_starting_stacks": 100,
+        "raw_starting_stacks": 200,   # 200 for 100 BB
         "player_count": 2,
         "mode": "tree"
     }
@@ -44,9 +44,8 @@ class TableActor:
         # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
-        self.replay = 1
-        self.tree_expansion = 5   # since most games last longer than 40 hands, if we use 5 then we throw away a ton of data
-        # for 3, we start throwing hands away 185 hands played if every player plays every street
+        self.replay = 1  # not really necessary with tree game. Useful with linear game.
+        self.tree_expansion = 3   # good options are 3, 4, 5
         self.use_early_stopping = True
         self.batch_size = batch_size
         self.log_folder = log_folder
@@ -64,6 +63,7 @@ class TableActor:
         self.game_params = None
         self.starting_stacks = None
         self.game_starting_stacks = None
+        self.stacks = None
 
         self.current_player_versions = None
         self.hand_info = None

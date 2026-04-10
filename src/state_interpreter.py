@@ -9,7 +9,7 @@ import pokerkit
 from dataclasses import dataclass
 from typing import Optional, Union
 import math
-from src.global_settings import MAX_TABLE_SIZE
+from src.ppo_self_play.global_settings import MAX_TABLE_SIZE
 
 
 def sign_fn(x):

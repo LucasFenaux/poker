@@ -14,7 +14,7 @@ from pokerkit import calculate_equities, parse_range, Deck, StandardHighHand, Ca
 from src.state_interpreter import StateSnapshot
 from src.action_interpreter import ActionInterpreter, Action
 from evaluate import get_latest_run_folder
-from src.alg import PPO
+from src.ppo_self_play.alg import PPO
 
 
 @dataclass

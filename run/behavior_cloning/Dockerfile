@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install top for monitoring
-RUN #apt-get install -y procps
+#RUN apt-get install -y procps
 
 # 🚀 The official way to install uv in Docker
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -23,11 +23,13 @@ COPY pyproject.toml uv.lock* ./
 # We use --no-install-project to just fetch the dependencies first for Docker caching
 RUN uv sync --no-dev --no-install-project
 
-# Now copy your actual poker code
-COPY ./src ./src
-COPY ./run ./run
+# Copy your actual poker code folder into the container
+COPY src ./src
+
+# NEW: Copy your entire 'run' folder to preserve the directory structure
+COPY run ./run
 
 ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 # Run the project using `uv run`, which automatically uses the container's .venv
-#CMD ["uv", "run", "main.py"]
-CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python run/ppo_self_play/main.py
+CMD ["uv", "run", "run/behavior_cloning/generate_data.py"]

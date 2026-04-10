@@ -1,7 +1,6 @@
 import random
 import threading
 import time
-from typing import Any
 
 import ray
 from ray.util.queue import Queue, Empty
@@ -9,14 +8,14 @@ import os
 import torch
 import numpy as np
 
-from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED
-from src.alg import PPO
-from src.trainer_actor import TrainerActor
-from src.table_actor import TableActor
-from src.leaderboard_actor import LeaderboardActor
+from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED
+from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.trainer_actor import TrainerActor
+from src.ppo_self_play.table_actor import TableActor
+from src.ppo_self_play.leaderboard_actor import LeaderboardActor
 import math
 from torch.utils.tensorboard import SummaryWriter
-from src.utils import SemanticTimer
+from src.shared import SemanticTimer
 
 
 class PlayerAI:
@@ -323,8 +322,7 @@ class CasinoManager:
 
         self.table_max_size = 2
         self.table_min_size = 2
-        self.batch_size = 5000 if RESOURCE_LIMITED else 100_000
-        # self.batch_size = 10000
+        self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
         self.on_policy = True
 
         # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
