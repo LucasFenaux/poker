@@ -8,6 +8,7 @@ from torch.distributions import Categorical, Normal
 import pokerkit
 from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
+from src.state_interpreter import StatePreprocessor
 
 
 class BaseAlgorithm:
@@ -50,17 +51,15 @@ class PPO(OnPolicyAlgorithm):
     available_update_modes = ["full_batch", "mini_batch"]
 
     default_hyperparameters = {
-                # "sgd_steps": 80,  # openai implementation
                 "sgd_steps": 5,
                 "base_batch_size": 5000,
                 "mini_batch_size": 5000,
-                "clip_threshold": 0.2,  # openai
-                "target_kl": 0.01,  # openai
+                "clip_threshold": 0.2,
+                "target_kl": 0.01,
                 "lr": 1e-4,
                 "value_lr": 5e-4,
                 "reward_normalization_scaler": 1,
-                "entropy_coef": 1e-4,
-                # "entropy_coef": 0,
+                "entropy_coef": 5e-3,
                 "grad_clip_norm": 0.5,
                 "update_mode": "mini_batch"
                 }
@@ -78,7 +77,6 @@ class PPO(OnPolicyAlgorithm):
         self.network = network
         self.value_network = value_network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-
         self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
 
         self.discrete = discrete
@@ -99,7 +97,6 @@ class PPO(OnPolicyAlgorithm):
     def set_network(self, network):
         self.network = network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        # self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
     def get_network(self):
         return self.network
@@ -108,11 +105,9 @@ class PPO(OnPolicyAlgorithm):
         network_param_dict, value_param_dict = param_dicts
         self.network.load_state_dict(network_param_dict)
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        # self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
         self.value_network.load_state_dict(value_param_dict)
         self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
-        # self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
 
     def load_optimizer_params(self, optimizer_params):
         network_opt_params, value_opt_params = optimizer_params
@@ -125,31 +120,41 @@ class PPO(OnPolicyAlgorithm):
     def get_optimizer_params(self):
         return [self.optimizer.state_dict(), self.value_optimizer.state_dict()]
 
+    def preprocess_batch(self, states_list, actors_list):
+        """Converts raw Python states/actors into a batched dictionary of PyTorch tensors."""
+        preprocessor = StatePreprocessor()
+        batch_dict = {}
+
+        # Process every state
+        for s, a in zip(states_list, actors_list):
+            processed = preprocessor.process(s, a)
+            for k, v in processed.items():
+                if k not in batch_dict:
+                    batch_dict[k] = []
+                batch_dict[k].append(v)
+
+        tensor_dict = {}
+        for k, v in batch_dict.items():
+            if k in ["num_players", "rel_to_button", "player_ranks", "player_suits", "board_ranks", "board_suits"]:
+                tensor_dict[k] = torch.tensor(v, dtype=torch.long, device=self.device)
+            else:
+                tensor_dict[k] = torch.tensor(v, dtype=torch.float32, device=self.device)
+        return tensor_dict
+
     def mini_batch_update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
         batch_size = len(batch_rewards)
         if isinstance(batch_rewards[0], torch.Tensor):
             batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
         else:
-            # 1. Cast every element to a standard Python float to strip away Fractions
             clean_rewards = [float(r) for r in batch_rewards]
-
-            # 2. Now NumPy will happily create a float32 array instead of an object_ array
             batch_rewards_np = np.array(clean_rewards, dtype=np.float32)
-
-            # 3. Convert to PyTorch tensor
             batch_rewards = torch.as_tensor(batch_rewards_np, device=self.device)
 
-        # states_list, current_actors_list = batch_states
-        # with torch.no_grad():
-        #     feature_vectors = []
-        #     for s, a in zip(states_list, current_actors_list):
-        #         feature_vectors.append(self.network.interpreter(s, a))
-        #     batch_feature_tensors = torch.stack(feature_vectors).to(self.device)
-        #
-        # # Wrap in a tuple so *states unpacks smoothly into the new forward() method
-        # states = (batch_feature_tensors,)
-        states = batch_states
+        # 1. Preprocess the states outside the SGD loop
+        states_list, current_actors_list = batch_states
+        batched_states_dict = self.preprocess_batch(states_list, current_actors_list)
+        states = (batched_states_dict,)
 
         if isinstance(batch_actions[0], torch.Tensor):
             actions = torch.stack(batch_actions).to(self.device).to(torch.long if self.discrete else torch.float32)
@@ -162,7 +167,6 @@ class PPO(OnPolicyAlgorithm):
         safe_actions = torch.clamp(actions, min=1e-5, max=1.0 - 1e-5)
 
         if batch_rnn_states is not None:
-            # we need to reshape the rnn states to be in the proper shape: (LxBxD)
             new_hs = []
             new_cs = []
             for (h, c) in batch_rnn_states:
@@ -176,37 +180,24 @@ class PPO(OnPolicyAlgorithm):
             normalized_sample_weights = sample_weights / sample_weights.mean()
             prob_sample_weights = sample_weights / sample_weights.sum()
 
-        # we scale the rewards logarithmically to avoid explosion and to minimize the advantage distortion from
-        # big all-ins
         sign = torch.sign(batch_rewards)
         batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
 
-        # pre-compute what we need
         with torch.no_grad():
-
             dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
             if not self.discrete:
                 logp_all = dist_old.log_prob(safe_actions)
-                # logp_all[:, 0] is the action choice, logp_all[:, 1] is the bet sizing
-
-                # Create a mask: 1.0 if it was a RAISE (>= 2/3), 0.0 otherwise
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-
-                # Only add the bet sizing log_prob if the action was actually a RAISE
                 logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
             else:
                 logp_old = dist_old.log_prob(safe_actions)
 
             value_function = self.value_network(*states).squeeze(-1)
-
-            # we normalize after here because we need to preserve the sign of the advantage so we cannot mean/std batch normalize it as that might shift it
             advantages = batch_rewards - value_function.clone().detach()
 
-            # mean/std normalize the advantages
             if sample_weights is None:
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             else:
-                # we do weighted normalization
                 weighted_mean = (advantages * prob_sample_weights).sum()
                 weighted_var = (prob_sample_weights * ((advantages - weighted_mean) ** 2)).sum()
                 weighted_std = torch.sqrt(weighted_var + 1e-8)
@@ -218,16 +209,15 @@ class PPO(OnPolicyAlgorithm):
         avg_p_loss = 0
         avg_e_loss = 0
 
-        # we then do multiple steps of SGD for the policy update
         for i in range(self.sgd_steps):
             indices = torch.randperm(batch_size, device=self.device)
-            # we do mini-batches
             for start_idx in range(0, batch_size, self.mini_batch_size):
-                # parse a mini batch
                 mini_batch_indices = indices[start_idx:start_idx + self.mini_batch_size]
 
-                mini_batch_states = [states_property[mini_batch_indices] if isinstance(states_property, torch.Tensor) else [states_property[idx] for idx in
-                                                                                         mini_batch_indices.tolist()] for states_property in states]
+                # Slice the dictionary tensors for the mini batch
+                mini_batch_dict = {k: v[mini_batch_indices] for k, v in states[0].items()}
+                mini_batch_states = (mini_batch_dict,)
+
                 mini_batch_rewards = batch_rewards[mini_batch_indices]
                 mini_batch_advantages = advantages[mini_batch_indices]
                 mini_batch_safe_actions = safe_actions[mini_batch_indices]
@@ -240,36 +230,27 @@ class PPO(OnPolicyAlgorithm):
                 if sample_weights is not None:
                     mini_batch_sample_weights = normalized_sample_weights[mini_batch_indices]
 
-                # compute what we need
                 self.value_optimizer.zero_grad()
                 value_function = self.value_network(*mini_batch_states).squeeze(-1)
 
-                # update the value network
                 if sample_weights is None:
-                    # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
                     value_loss = torch.nn.functional.smooth_l1_loss(value_function, mini_batch_rewards)
                 else:
                     value_loss = torch.nn.functional.smooth_l1_loss(value_function, mini_batch_rewards, reduction="none")
-                    assert value_loss.dim() == mini_batch_sample_weights.dim()
                     value_loss = (value_loss * mini_batch_sample_weights).mean()
 
                 value_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_clip_norm)
-
                 self.value_optimizer.step()
 
-                # we then update the policy network
-                # get the policy of current and old
                 self.optimizer.zero_grad()
                 dist = self.get_model_policy(self.network, mini_batch_states, mini_batch_rnn_states)
 
-                # masked irrelevant bet sizing
                 if not self.discrete:
                     logp_all = dist.log_prob(mini_batch_safe_actions)
                     is_raise = (mini_batch_safe_actions[:, 0] >= Action.get_raise_threshold()).float()
                     logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
 
-                    # You also need to mask the entropy!
                     entropy_all = dist.entropy()
                     entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
                 else:
@@ -283,22 +264,19 @@ class PPO(OnPolicyAlgorithm):
 
                 if approx_kl.item() > 1.5 * self.target_kl:
                     break
+
                 ratio = torch.exp(logp - mini_batch_logp_old)
-                # compute the sign-dependent advantage coefficient
                 policy_loss = -torch.min(ratio * mini_batch_advantages, torch.clamp(ratio, 1.0 - self.clip_threshold,
                                                                          1.0 + self.clip_threshold) * mini_batch_advantages)
                 if sample_weights is None:
                     policy_loss = policy_loss.mean()
                 else:
-                    # we do a weighted mean
                     policy_loss = (policy_loss * mini_batch_sample_weights).mean()
 
                 if not torch.isfinite(policy_loss):
                     print("WARNING: loss is not finite")
 
-                # add the entropy reg component
                 entropy_loss = entropy.mean()
-
                 loss = policy_loss - (self.entropy_coef * entropy_loss)
 
                 loss.backward()
@@ -310,19 +288,18 @@ class PPO(OnPolicyAlgorithm):
                 avg_p_loss += policy_loss.item()
                 avg_e_loss += entropy_loss.item()
                 count += 1
+
         if count != 0:
             loss = avg_loss / count
             value_loss = avg_v_loss / count
             policy_loss = avg_p_loss / count
             entropy_loss = avg_e_loss / count
-
         else:
             loss = avg_loss
             value_loss = avg_v_loss
             policy_loss = avg_p_loss
             entropy_loss = avg_e_loss
 
-        # compute a histogram
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
             samples = dist.sample((1000,))
@@ -334,7 +311,6 @@ class PPO(OnPolicyAlgorithm):
                 action_hist = torch.sigmoid(action_hist)
                 betting_size = torch.sigmoid(betting_size)
             elif self.mode == "beta":
-                dist: torch.distributions.Beta
                 alpha_tensor = dist.concentration1[0]
                 beta_tensor = dist.concentration0[0]
 
@@ -346,18 +322,18 @@ class PPO(OnPolicyAlgorithm):
                **kwargs):
         batch_size = len(batch_rewards)
         sgd_steps = max(self.sgd_steps, self.sgd_steps * batch_size // self.base_batch_size)
+
         if isinstance(batch_rewards[0], torch.Tensor):
             batch_rewards = torch.stack(batch_rewards).to(self.device).to(torch.float32)
         else:
-            # 1. Cast every element to a standard Python float to strip away Fractions
             clean_rewards = [float(r) for r in batch_rewards]
-
-            # 2. Now NumPy will happily create a float32 array instead of an object_ array
             batch_rewards_np = np.array(clean_rewards, dtype=np.float32)
-
-            # 3. Convert to PyTorch tensor
             batch_rewards = torch.as_tensor(batch_rewards_np, device=self.device)
-        states = batch_states
+
+        # 1. Preprocess the states outside the SGD loop
+        states_list, current_actors_list = batch_states
+        batched_states_dict = self.preprocess_batch(states_list, current_actors_list)
+        states = (batched_states_dict,)
 
         if isinstance(batch_actions[0], torch.Tensor):
             actions = torch.stack(batch_actions).to(self.device).to(torch.long if self.discrete else torch.float32)
@@ -370,7 +346,6 @@ class PPO(OnPolicyAlgorithm):
         safe_actions = torch.clamp(actions, min=1e-5, max=1.0 - 1e-5)
 
         if batch_rnn_states is not None:
-            # we need to reshape the rnn states to be in the proper shape: (LxBxD)
             new_hs = []
             new_cs = []
             for (h, c) in batch_rnn_states:
@@ -384,38 +359,24 @@ class PPO(OnPolicyAlgorithm):
             normalized_sample_weights = sample_weights / sample_weights.mean()
             prob_sample_weights = sample_weights / sample_weights.sum()
 
-        # batch_rewards = batch_rewards / self.reward_normalization_scaler  # we scale down the rewards
-        # we scale the rewards logarithmically to avoid explosion and to minimize the advantage distortion from
-        # big all-ins
         sign = torch.sign(batch_rewards)
         batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
 
-        # pre-compute what we need
         with torch.no_grad():
-
             dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
             if not self.discrete:
                 logp_all = dist_old.log_prob(safe_actions)
-                # logp_all[:, 0] is the action choice, logp_all[:, 1] is the bet sizing
-
-                # Create a mask: 1.0 if it was a RAISE (>= 2/3), 0.0 otherwise
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-
-                # Only add the bet sizing log_prob if the action was actually a RAISE
                 logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
             else:
                 logp_old = dist_old.log_prob(safe_actions)
 
             value_function = self.value_network(*states).squeeze(-1)
-
-            # we normalize after here because we need to preserve the sign of the advantage so we cannot mean/std batch normalize it as that might shift it
             advantages = batch_rewards - value_function.clone().detach()
 
-            # mean/std normalize the advantages
             if sample_weights is None:
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             else:
-                # we do weighted normalization
                 weighted_mean = (advantages * prob_sample_weights).sum()
                 weighted_var = (prob_sample_weights * ((advantages - weighted_mean) ** 2)).sum()
                 weighted_std = torch.sqrt(weighted_var + 1e-8)
@@ -427,41 +388,28 @@ class PPO(OnPolicyAlgorithm):
         avg_p_loss = 0
         avg_e_loss = 0
 
-        # we then do multiple steps of SGD for the policy update
         for i in range(sgd_steps):
-            # compute what we need
             self.value_optimizer.zero_grad()
             value_function = self.value_network(*states).squeeze(-1)
-            # we scale down the predicted reward
-            value_function = value_function
 
-            # update the value network
             if sample_weights is None:
-                # value_loss = torch.nn.functional.mse_loss(value_function, batch_rewards)
                 value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards)
             else:
-                # can switch back to MSE since we added the log scaling
                 value_loss = torch.nn.functional.smooth_l1_loss(value_function, batch_rewards, reduction="none")
-                assert value_loss.dim() == normalized_sample_weights.dim()
                 value_loss = (value_loss * normalized_sample_weights).mean()
 
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_clip_norm)
-
             self.value_optimizer.step()
 
-            # we then update the policy network
-            # get the policy of current and old
             self.optimizer.zero_grad()
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
 
-            # masked irrelevant bet sizing
             if not self.discrete:
                 logp_all = dist.log_prob(safe_actions)
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
                 logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
 
-                # You also need to mask the entropy!
                 entropy_all = dist.entropy()
                 entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
             else:
@@ -476,48 +424,42 @@ class PPO(OnPolicyAlgorithm):
             if approx_kl.item() > 1.5 * self.target_kl:
                 break
             ratio = torch.exp(logp - logp_old)
-            # compute the sign-dependent advantage coefficient
             policy_loss = -torch.min(ratio * advantages, torch.clamp(ratio, 1.0 - self.clip_threshold,
                                                                      1.0 + self.clip_threshold) * advantages)
             if sample_weights is None:
                 policy_loss = policy_loss.mean()
             else:
-                # we do a weighted mean
                 policy_loss = (policy_loss * normalized_sample_weights).mean()
 
             if not torch.isfinite(policy_loss):
                 print("WARNING: loss is not finite")
 
-            # add the entropy reg component
             entropy_loss = entropy.mean()
-
             loss = policy_loss - (self.entropy_coef * entropy_loss)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
-
             self.optimizer.step()
+
             avg_v_loss += value_loss.item()
             avg_loss += loss.item()
             avg_p_loss += policy_loss.item()
             avg_e_loss += entropy_loss.item()
             count += 1
+
         if count != 0:
             loss = avg_loss / count
             value_loss = avg_v_loss / count
             policy_loss = avg_p_loss / count
             entropy_loss = avg_e_loss / count
-
         else:
             loss = avg_loss
             value_loss = avg_v_loss
             policy_loss = avg_p_loss
             entropy_loss = avg_e_loss
 
-        # compute a histogram
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            # samples = dist.sample((1000,))[:, :, 0]
             samples = dist.sample((1000,))
             action_hist = samples[:, :, 0]
             betting_size = samples[:, :, 1]
@@ -527,11 +469,8 @@ class PPO(OnPolicyAlgorithm):
                 action_hist = torch.sigmoid(action_hist)
                 betting_size = torch.sigmoid(betting_size)
             elif self.mode == "beta":
-                dist: torch.distributions.Beta
                 alpha_tensor = dist.concentration1[0]
                 beta_tensor = dist.concentration0[0]
-
-        # Log the actual distribution shape to TensorBoard
 
         return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
                 "action_hist": action_hist, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor,
@@ -550,15 +489,24 @@ class PPO(OnPolicyAlgorithm):
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)
-        return policy.sample().cpu()
+        return policy.sample().cpu().squeeze(0)
 
-    def get_model_policy(self, network, state: (pokerkit.State, int), rnn_state = None) -> Union[Categorical, Normal]:
+    def get_model_policy(self, network, state, rnn_state = None) -> Union[Categorical, Normal]:
+        # Handle live play tuples that need preprocessing
+        if isinstance(state, tuple) and len(state) == 2 and not isinstance(state[0], dict):
+            s, a = state
+            batched_dict = self.preprocess_batch([s], [a])
+            state_args = (batched_dict,)
+        else:
+            # Handle already batched dictionary states
+            state_args = state
+
         if self.discrete:
-            logits = network(*state)
+            logits = network(*state_args)
             dist: Categorical = Categorical(logits)
             return dist
         else:
-            dist: Normal = network(*state)  # already returns a Normal distribution when not deterministic
+            dist: Normal = network(*state_args)
             return dist
 
 
@@ -566,6 +514,7 @@ class PPOInferenceWrapper:
     def __init__(self, models, discrete: bool = False):
         self.network = models[0]
         self.discrete = discrete
+        self.device = next(self.network.parameters()).device
 
     def load_params(self, param_dicts):
         network_param_dict, _ = param_dicts
@@ -576,17 +525,43 @@ class PPOInferenceWrapper:
 
     def to(self, device):
         self.network = self.network.to(device)
+        self.device = device
         return self
+
+    def preprocess_batch(self, states_list, actors_list):
+        preprocessor = StatePreprocessor()
+        batch_dict = {}
+        for s, a in zip(states_list, actors_list):
+            processed = preprocessor.process(s, a)
+            for k, v in processed.items():
+                if k not in batch_dict:
+                    batch_dict[k] = []
+                batch_dict[k].append(v)
+
+        tensor_dict = {}
+        for k, v in batch_dict.items():
+            if k in ["num_players", "rel_to_button", "player_ranks", "player_suits", "board_ranks", "board_suits"]:
+                tensor_dict[k] = torch.tensor(v, dtype=torch.long, device=self.device)
+            else:
+                tensor_dict[k] = torch.tensor(v, dtype=torch.float32, device=self.device)
+        return tensor_dict
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)
-        return policy.sample().cpu()
+        return policy.sample().cpu().squeeze(0)
 
-    def get_model_policy(self, network, state: (pokerkit.State, int), rnn_state = None) -> Union[Categorical, Normal]:
+    def get_model_policy(self, network, state, rnn_state = None) -> Union[Categorical, Normal]:
+        if isinstance(state, tuple) and len(state) == 2 and not isinstance(state[0], dict):
+            s, a = state
+            batched_dict = self.preprocess_batch([s], [a])
+            state_args = (batched_dict,)
+        else:
+            state_args = state
+
         if self.discrete:
-            logits = network(*state)
+            logits = network(*state_args)
             dist: Categorical = Categorical(logits)
             return dist
         else:
-            dist: Normal = network(*state)  # already returns a Normal distribution when not deterministic
+            dist: Normal = network(*state_args)
             return dist

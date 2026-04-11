@@ -14,7 +14,6 @@ from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
 
 
 # --- 1. Baseline Bot Logic ---
-
 def get_valid_actions_dict(state: State) -> dict:
     valid_actions = {}
     if state.can_fold():
@@ -86,7 +85,6 @@ class FastBaselineBot:
 
 
 # --- 2. Evaluation Engine Helpers ---
-
 def get_latest_run_folder(base_path="results"):
     runs = glob.glob(os.path.join(base_path, "run_*"))
     if not runs:
@@ -97,14 +95,21 @@ def get_latest_run_folder(base_path="results"):
 def load_ai_player(model_path, device):
     models = PPO.init_networks(device, mode="beta", discrete=False)
     ai_player = PPOInferenceWrapper(models, discrete=False)
-    checkpoint, _ = torch.load(model_path, map_location=device, weights_only=True)
+
+    loaded_data = torch.load(model_path, map_location=device, weights_only=True)
+
+    # Handle both PPO tuple format and pure BC list format smoothly
+    if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+        checkpoint = loaded_data[0]
+    else:
+        checkpoint = loaded_data
+
     ai_player.load_params(checkpoint)
     ai_player.to(device)
     return ai_player
 
 
 # --- 3. REUSABLE GAME LOOP ---
-
 def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter, baseline_bot, verbose=False):
     """Runs N games for a specific AI and returns the array of profit per hand (in bb)."""
     min_bb_ratio = 1
@@ -158,7 +163,7 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
                 # --- AI TURN ---
                 snapshot = extract_state_snapshot(state, actor)
                 with torch.no_grad():
-                    action_tensor = ai_player.get_action((snapshot, actor))
+                    action_tensor = ai_player.get_action((snapshot, actor)).squeeze(0)
 
                 s_min_bet = state.min_completion_betting_or_raising_to_amount or max(state.bets)
                 s_max_bet = state.max_completion_betting_or_raising_to_amount or s_min_bet
@@ -211,14 +216,20 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
     return np.array(ai_winnings_per_hand_bb, dtype=float)
 
 
-def evaluate_agent(num_games, run_folder, player_id, max_table_size):
+def evaluate_agent(num_games, run_folder, player_id, max_table_size, explicit_model_path=None):
     device = torch.device("cpu")
     action_interpreter = ActionInterpreter()
     baseline_bot = FastBaselineBot(player_index=0)
 
-    model_path = os.path.join(run_folder, "players", f"{player_id}.pt")
+    # Use the explicit path if provided, otherwise reconstruct the normal PPO run folder path
+    if explicit_model_path:
+        model_path = explicit_model_path
+    else:
+        model_path = os.path.join(run_folder, "players", f"{player_id}.pt")
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model weights not found at {model_path}")
+
     print(f"Loading AI Model from: {model_path}")
     ai_player = load_ai_player(model_path, device)
 
@@ -267,8 +278,13 @@ if __name__ == '__main__':
     parser.add_argument("--player_id", type=int, default=0, help="ID of the trained player to evaluate (default: 0)")
     parser.add_argument("--max_table_size", type=int, default=2,
                         help="Maximum number of players at the table (default: 2)")
+    # NEW ARGUMENT
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="Direct path to a .pt file (Overrides run_folder/player_id)")
 
     args = parser.parse_args()
-    target_folder = args.run_folder if args.run_folder else get_latest_run_folder()
 
-    evaluate_agent(args.games, target_folder, args.player_id, args.max_table_size)
+    # We only care about the run folder if the user didn't explicitly provide a model path
+    target_folder = args.run_folder if args.run_folder else (get_latest_run_folder() if not args.model_path else None)
+
+    evaluate_agent(args.games, target_folder, args.player_id, args.max_table_size, explicit_model_path=args.model_path)

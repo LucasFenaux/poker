@@ -32,19 +32,12 @@ def get_save_folder(base_path="results"):
 if __name__ == '__main__':
     try:
         ray.init("auto", namespace="casino",
-                 # runtime_env={
-                 #     "env_vars":{
-                 #         "OMP_NUM_THREADS": "1",
-                 #         "MKL_NUM_THREADS": "1",
-                 #         "OPENBLAS_NUM_THREADS": "1",
-                 #         "VECLIB_MAXIMUM_THREADS": "1",
-                 #         "NUMEXPR_NUM_THREADS": "1"
-                 #     }
-                 # }
                  )
         device = torch.device("cpu")
         save_folder = get_save_folder()
-        manager: CasinoManager = CasinoManager(device, save_folder=save_folder)
+        bc_pretrained_model_path = "bc_pretrained_model.pt"
+        manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
+                                               bc_pretrained_model_path=bc_pretrained_model_path)
         manager.start()
         ray.shutdown()
     except Exception as e:

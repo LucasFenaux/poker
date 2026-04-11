@@ -274,7 +274,7 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
         elif interpreted_action == Action.RAISE:
             legal_min = state.min_completion_betting_or_raising_to_amount
             legal_max = state.max_completion_betting_or_raising_to_amount
-            print(legal_min, legal_max)
+            # print(legal_min, legal_max)
             if legal_min is not None and legal_max is not None:
                 clamped_bet = max(legal_min, min(bet_sizing, legal_max))
                 state.complete_bet_or_raise_to(clamped_bet)
@@ -288,17 +288,7 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
                 executed_action_str = "FOLD (Fallback)"
 
         else:  # ALL_IN
-            all_in_size = state.max_completion_betting_or_raising_to_amount
-            if state.can_complete_bet_or_raise_to(all_in_size):
-                state.complete_bet_or_raise_to(all_in_size)
-                executed_action_str = f"ALL IN ({float(all_in_size) / float(big_blind):.1f} BB)"
-            elif state.can_check_or_call():
-                amt = state.checking_or_calling_amount
-                state.check_or_call()
-                executed_action_str = "CHECK (Fallback)" if amt == 0 else "CALL (Fallback)"
-            elif state.can_fold():
-                state.fold()
-                executed_action_str = "FOLD (Fallback)"
+            raise RuntimeError(f"Unknown action: {interpreted_action}")
 
         print(f"  👉 Player {pid:>3} chooses: {executed_action_str}")
 

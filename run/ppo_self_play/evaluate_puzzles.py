@@ -24,15 +24,21 @@ class PokerPuzzle:
     snapshot: StateSnapshot
     actor_index: int
     acceptable_actions: list[Action]
-    baseline_ev: float = 0.0  # NEW: Holds the True Mathematical EV
+    baseline_ev: float = 0.0
 
 
 def load_eval_models(model_path, device):
     """Custom loader that extracts BOTH the Policy and Value networks."""
     policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
-    checkpoint, _ = torch.load(model_path, map_location=device, weights_only=True)
 
-    # Checkpoint contains: [network_dict, value_dict, opt_dict, value_opt_dict]
+    loaded_data = torch.load(model_path, map_location=device, weights_only=True)
+
+    # Handle both PPO tuple format and pure BC list format smoothly
+    if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+        checkpoint = loaded_data[0]
+    else:
+        checkpoint = loaded_data
+
     policy_net.load_state_dict(checkpoint[0])
     value_net.load_state_dict(checkpoint[1])
 
@@ -45,10 +51,6 @@ def load_eval_models(model_path, device):
 
 
 def build_puzzle_suite() -> list[PokerPuzzle]:
-    """
-    Constructs a comprehensive suite of exact poker scenarios.
-    All scenarios assume Heads Up (2-Max), Blinds 1/2.
-    """
     puzzles = []
 
     puzzles.append(PokerPuzzle(
@@ -120,40 +122,32 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
 
 
 def calculate_math_evs(puzzles: list[PokerPuzzle]):
-    """Uses PokerKit to calculate the true mathematical EV for the optimal action."""
     print("🧮 Calculating True Mathematical EV for puzzles using PokerKit...")
 
-    # We test against the identical villain range from the evaluate.py Baseline Bot
     villain_range = parse_range('22+,A2+,K2+,Q2+,J2+,T2+,92+,82+,72+,62+,52+,42+,32+')
 
     for p in puzzles:
-        # 1. Fold Scenarios have exactly 0.0 EV (No future profit expected)
         if Action.CHECK_OR_FOLD in p.acceptable_actions and len(p.acceptable_actions) == 1:
             p.baseline_ev = 0.0
             continue
 
-        # 2. Extract and format the board (THE FIX: Pass rank and suit as two separate arguments)
         board_str = p.snapshot.board_cards.replace("?", "")
         flat_board = [Card(board_str[i], board_str[i + 1]) for i in range(0, len(board_str), 2)]
 
-        # 3. Calculate True Equity
         my_range = parse_range(p.snapshot.hole_cards)
         equities = calculate_equities(
             (my_range, villain_range), flat_board, 2, 5, Deck.STANDARD, (StandardHighHand,), sample_count=1500
         )
         equity = equities[0]
 
-        # 4. Calculate Showdown EV = (Equity * Final_Pot) - Amount_to_Call
         my_bet = p.snapshot.bets[p.actor_index]
         villain_bet = p.snapshot.bets[1 - p.actor_index]
         current_pot = sum(p.snapshot.pots) + my_bet + villain_bet
 
         if p.name == "Short Stack AKo":
-            # Custom sizing for the Shove scenario
-            amount_to_call = 4.0  # We shove 4BB total
-            final_pot = 10.0  # 5BB from us, 5BB from them
+            amount_to_call = 4.0
+            final_pot = 10.0
         else:
-            # Standard Call EV
             amount_to_call = max(0.0, villain_bet - my_bet)
             final_pot = current_pot + amount_to_call
 
@@ -163,7 +157,6 @@ def calculate_math_evs(puzzles: list[PokerPuzzle]):
 
 
 def plot_population_parameters(puzzle_params: dict, run_folder: str):
-    """Generates a scatter plot of Alpha vs Beta for all puzzles."""
     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
     fig.suptitle("Alpha vs Beta Parameters per Puzzle (Action Choice)", fontsize=18, fontweight='bold')
 
@@ -189,20 +182,23 @@ def plot_population_parameters(puzzle_params: dict, run_folder: str):
     print(f"\n📊 Saved Alpha/Beta scatter plot to: {plot_path}")
 
 
-def evaluate_puzzles(run_folder):
+def evaluate_puzzles(run_folder, explicit_model_path=None):
     device = torch.device("cpu")
     action_interpreter = ActionInterpreter()
 
-    # Build puzzles and calculate their mathematical EV!
     puzzles = build_puzzle_suite()
     puzzles = calculate_math_evs(puzzles)
 
-    players_dir = os.path.join(run_folder, "players")
-    if not os.path.exists(players_dir):
-        raise FileNotFoundError(f"Players directory not found: {players_dir}")
+    # Use the explicit path if provided, otherwise search the run folder
+    if explicit_model_path:
+        model_files = [explicit_model_path]
+    else:
+        players_dir = os.path.join(run_folder, "players")
+        if not os.path.exists(players_dir):
+            raise FileNotFoundError(f"Players directory not found: {players_dir}")
 
-    model_files = glob.glob(os.path.join(players_dir, "*.pt"))
-    model_files.sort(key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
+        model_files = glob.glob(os.path.join(players_dir, "*.pt"))
+        model_files.sort(key=lambda f: int(os.path.splitext(os.path.basename(f))[0]))
 
     if not model_files:
         print("No .pt files found!")
@@ -210,8 +206,7 @@ def evaluate_puzzles(run_folder):
 
     print(f"\n==================================================")
     print(f"🧠 POKER IQ TEST: FIXED SCENARIO EVALUATION 🧠")
-    print(f"Run Folder: {run_folder}")
-    print(f"Population: {len(model_files)} models | Puzzles: {len(puzzles)}")
+    print(f"Models to Evaluate: {len(model_files)} | Puzzles: {len(puzzles)}")
     print(f"==================================================\n")
 
     puzzle_pass_counts = {p.name: 0 for p in puzzles}
@@ -233,13 +228,12 @@ def evaluate_puzzles(run_folder):
                     policy = policy_net(puzzle.snapshot, puzzle.actor_index)
                     raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
 
-                    # Reverse the log scaling to get True BB EV
                     sign = 1.0 if raw_value_pred >= 0 else -1.0
                     true_value_pred = sign * (np.exp(abs(raw_value_pred)) - 1.0)
 
                     alpha_val = policy.concentration1.squeeze()[0].item()
                     beta_val = policy.concentration0.squeeze()[0].item()
-                    action_tensor = policy.mean.cpu()
+                    action_tensor = policy.mean.cpu().squeeze(0)
 
                 interpreted_action, _ = action_interpreter(
                     action_tensor, puzzle.snapshot.min_bet, puzzle.snapshot.max_bet
@@ -254,7 +248,6 @@ def evaluate_puzzles(run_folder):
                 puzzle_params[puzzle.name]['betas'].append(beta_val)
                 puzzle_params[puzzle.name]['values'].append(true_value_pred)
 
-                # Print trace with Math EV comparison
                 mark = "✅" if passed else "❌"
                 print(
                     f"  {mark} [{puzzle.name:<18}] α/β: {alpha_val:>5.2f}/{beta_val:>5.2f} | Pred EV: {true_value_pred:>+6.2f} BB | Math EV: {puzzle.baseline_ev:>+6.2f} BB -> {interpreted_action.name}"
@@ -268,27 +261,16 @@ def evaluate_puzzles(run_folder):
 
     elapsed = time.time() - start_time
 
-    # --- Print Aggregate Report ---
     print("\n" + "=" * 80)
-    print("🏆 POPULATION IQ REPORT 🏆".center(80))
+    print("🏆 IQ REPORT 🏆".center(80))
     print("=" * 80)
     print(f"Evaluation Time: {elapsed:.1f}s")
 
     avg_score = np.mean([p["score"] for p in player_scores])
-    print(f"Average Population Score: {avg_score:.1f} / {len(puzzles)} ({(avg_score / len(puzzles)) * 100:.1f}%)")
+    print(f"Average Score: {avg_score:.1f} / {len(puzzles)} ({(avg_score / len(puzzles)) * 100:.1f}%)")
     print("-" * 80)
 
-    print("🧩 SCENARIO PASS RATES:")
-    for puzzle in puzzles:
-        pass_rate = (puzzle_pass_counts[puzzle.name] / len(model_files)) * 100
-        print(f"  {puzzle.name:<22}: {pass_rate:>5.1f}% Passed")
-
-    print("-" * 80)
-
-    # ---------------------------------------------------------
-    # AVERAGE PARAMETERS REPORT (With True Expected Value)
-    # ---------------------------------------------------------
-    print("🧠 AVERAGE POPULATION PARAMETERS (AI vs MATH EV):")
+    print("🧠 PARAMETERS (AI vs MATH EV):")
     for puzzle in puzzles:
         alphas = puzzle_params[puzzle.name]['alphas']
         betas = puzzle_params[puzzle.name]['betas']
@@ -303,26 +285,24 @@ def evaluate_puzzles(run_folder):
             avg_alpha, avg_beta, avg_action_mean, avg_val = 0.0, 0.0, 0.0, 0.0
 
         diff = abs(avg_val - puzzle.baseline_ev)
-
         print(
             f"  {puzzle.name:<18} | Action Mean: {avg_action_mean:.3f} | Pred EV: {avg_val:>+6.2f} BB | Math EV: {puzzle.baseline_ev:>+6.2f} BB | Diff: {diff:>6.2f}"
         )
 
     print("-" * 80)
-    # ---------------------------------------------------------
 
-    best_player = max(player_scores, key=lambda x: x["score"])
-    print(f"🌟 Smartest Model: ID {best_player['id']} with {best_player['score']}/{len(puzzles)}")
-    print("=" * 80)
-
-    plot_population_parameters(puzzle_params, run_folder)
+    # We only plot if we evaluated a population. Plotting a single point scatter plot isn't helpful.
+    if len(model_files) > 1:
+        plot_population_parameters(puzzle_params, run_folder)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate Poker AIs against fixed logic puzzles.")
     parser.add_argument("--run_folder", type=str, default=None, help="Path to the run folder")
+    # NEW ARGUMENT
+    parser.add_argument("--model_path", type=str, default=None, help="Direct path to a .pt file (Overrides run_folder)")
 
     args = parser.parse_args()
-    target_folder = args.run_folder if args.run_folder else get_latest_run_folder()
+    target_folder = args.run_folder if args.run_folder else (get_latest_run_folder() if not args.model_path else None)
 
-    evaluate_puzzles(target_folder)
+    evaluate_puzzles(target_folder, explicit_model_path=args.model_path)

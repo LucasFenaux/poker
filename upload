@@ -16,4 +16,4 @@
 #scp pyproject.toml click1:/home/lprfenau/poker/
 #scp uv.lock click1:/home/lprfenau/poker/
 
-rsync -avz -e "ssh -q" ./src ./run .rayignore .python-version get_from_docker remove_last_X_run_results existing_results Dockerfile docker-compose.yml pyproject.toml uv.lock click1:/home/lprfenau/poker/
+rsync -avz -e "ssh -q" ./src ./run ./data bc_pretrained_model.pt .rayignore .python-version get_from_docker remove_last_X_run_results existing_results Dockerfile docker-compose.yml pyproject.toml uv.lock click1:/home/lprfenau/poker/

@@ -26,8 +26,10 @@ RUN uv sync --no-dev --no-install-project
 # Now copy your actual poker code
 COPY ./src ./src
 COPY ./run ./run
+COPY ./ ./
 
 ENV PYTHONPATH=/app
 # Run the project using `uv run`, which automatically uses the container's .venv
 #CMD ["uv", "run", "main.py"]
-CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python run/ppo_self_play/main.py
+#CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 && uv run python run/ppo_self_play/main.py
+CMD uv run ray start --head --dashboard-host=0.0.0.0 --port=6379 --ray-client-server-port=10001 --object-store-memory=250000000000 --system-config='{"automatic_object_spilling_enabled": false}' --temp-dir=/dev/shm/ray && uv run python run/ppo_self_play/main.py

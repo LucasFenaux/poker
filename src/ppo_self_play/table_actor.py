@@ -182,16 +182,7 @@ class TableActor:
             else:
                 raise RuntimeError("No legal fallback from RAISE")
         else:
-            assert interpreted_action == Action.ALL_IN
-            all_in_size = state.max_completion_betting_or_raising_to_amount
-            if state.can_complete_bet_or_raise_to(all_in_size):
-                state.complete_bet_or_raise_to(all_in_size)
-            elif state.can_check_or_call():
-                state.check_or_call()
-            elif state.can_fold():
-                state.fold()
-            else:
-                raise RuntimeError("No legal fallback from ALL_IN")
+            raise RuntimeError("No legal fallback")
 
     def _play_tree_level(self, state: pokerkit.State, depth):
         assert depth < 4
@@ -212,7 +203,7 @@ class TableActor:
                 try:
                     with torch.no_grad():
                         player_action_tensor = player.get_action((snapshot, current_actor))
-                        player_action = player_action_tensor.detach().cpu()
+                        player_action = player_action_tensor.detach().cpu().squeeze(0)
                 except Exception as e:
                     # print(state)
                     print("tree_level", e)
@@ -385,7 +376,7 @@ class TableActor:
                 try:
                    with torch.no_grad():
                         player_action_tensor = player.get_action((snapshot, current_actor))
-                        player_action = player_action_tensor.detach().cpu()
+                        player_action = player_action_tensor.detach().cpu().squeeze(0)
                 except Exception as e:
                     print("linear_round", state)
                     raise e

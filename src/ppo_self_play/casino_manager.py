@@ -292,7 +292,8 @@ class PlanTableScheduler:
 
 
 class CasinoManager:
-    def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False):
+    def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
+                 bc_pretrained_model_path: str = None):
         self.player_ids = list(range(NUM_PLAYERS))
         self.device = device
         self.save_folder = save_folder
@@ -318,6 +319,19 @@ class CasinoManager:
         # we spin up the player models
         self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                         self.player_ids]
+        if bc_pretrained_model_path is not None:
+            print(f"Loading pretrained model from {bc_pretrained_model_path}")
+            # load the model
+            param_dicts = torch.load(bc_pretrained_model_path, map_location=torch.device("cpu"), weights_only=True)
+
+            loaded_players = []
+            for player in self.players:
+                player: PlayerAI = ray.get(player)
+                player.load_params(param_dicts)
+                loaded_players.append(ray.put(player))
+
+            self.players = loaded_players
+
         self.player_training_counts = [0] * len(self.player_ids)
 
         self.table_max_size = 2

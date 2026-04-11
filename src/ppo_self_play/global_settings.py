@@ -6,7 +6,8 @@ import os
 # 4 tables
 # 2 trainers
 
-NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
+# NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
+NUM_CPUS=os.environ.get("RAY_NUM_CPUS",10)
 NUM_GPUS=0
 MAX_TABLE_SIZE=2
 
@@ -19,5 +20,5 @@ MAX_TABLE_SIZE=2
 # ripple settings
 NUM_PLAYERS=50
 NUM_TABLES=30
-NUM_TRAINERS=20
+NUM_TRAINERS=50
 RESOURCE_LIMITED=False
