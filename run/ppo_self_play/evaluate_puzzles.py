@@ -169,10 +169,10 @@ def plot_population_parameters(puzzle_params: dict, run_folder: str):
         ax.set_xlabel("Alpha (Pushing towards Raise)", fontsize=10)
         ax.set_ylabel("Beta (Pushing towards Fold)", fontsize=10)
 
-        ax.set_xlim(-2, 52)
-        ax.set_ylim(-2, 52)
+        ax.set_xlim(-2, 502)
+        ax.set_ylim(-2, 502)
 
-        ax.plot([-2, 52], [-2, 52], 'r--', alpha=0.5, label="Confusion (Mean 0.5)")
+        ax.plot([-2, 502], [-2, 502], 'r--', alpha=0.5, label="Confusion (Mean 0.5)")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
 
