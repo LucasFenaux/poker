@@ -2,6 +2,7 @@ import pickle
 from collections import deque
 import pokerkit
 import ray
+from typing import Union
 from ray.util.queue import Queue, Empty
 import os
 from torch.utils.tensorboard import SummaryWriter
@@ -11,10 +12,11 @@ import torch
 from src.action_interpreter import ActionInterpreter, Action
 from src.state_interpreter import extract_state_snapshot
 from src.ppo_self_play.alg import PPOInferenceWrapper, PPO
+from src.player_ai import PlayerAI, RNNPlayerAI
 from src.shared import SemanticTimer
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
-# @ray.remote(num_cpus=1)
 @ray.remote(num_cpus=0)
 class TableActor:
     default_params = {
@@ -29,7 +31,6 @@ class TableActor:
 
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
                  model_mode: str, batch_size: int, log_folder: str):
-        # torch.set_num_threads(1)
 
         self.table_id = table_id
         self.in_queue = in_queue
@@ -59,6 +60,7 @@ class TableActor:
         self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
                         for _ in range(max_table_size)]
         self.game_players = self.players[:]
+        self.trainable_players = None
         self.params = None
         self.game_params = None
         self.starting_stacks = None
@@ -72,9 +74,21 @@ class TableActor:
         self.mode = None
         self._play_round = None
 
-    def reset(self, players_params_list, player_ids, **table_params):
+        # for recurrent models
+        self.hand_memories = None
+        self.game_memories = None
+
+    def reset(self, players: list[Union[PlayerAI, RNNPlayerAI]], player_ids, **table_params):
         self.player_ids = player_ids
         self.game_player_ids = self.player_ids[:]
+        players_params_list = [player.get_params() for player in players]
+        self.trainable_players = players
+        # if recurrent, we init the game and hand memories
+        if IS_RECURRENT:
+            for player in players:
+                assert isinstance(player, RNNPlayerAI)
+            self.game_memories = [player.init_game_memory(batch_size=1) for player in players]
+            self.hand_memories = [player.init_hand_memory(batch_size=1) for player in players]
 
         self.player_winnings = {player_id: 0.0 for player_id in self.player_ids}
 
@@ -105,6 +119,12 @@ class TableActor:
         self.game_starting_stacks = self.starting_stacks[:]
 
         self.mode = self.game_params.pop("mode")
+        if IS_RECURRENT:
+            # only support linear mode for recurrent models, since it requires to keep the sequential aspect.
+            # TODO: think to see if tree is compatible. Maybe by duplicating previous steps to keep parallel linear paths rather than branches at storage time.
+            # TODO: [continue] could set all sample_weights to 1, but use the expected reward rather than the specific path reward to still help with variance
+            self.mode = "linear"
+
         if self.mode == "linear":
             self._play_round = self._play_linear_round
         elif self.mode == "tree":
@@ -123,6 +143,8 @@ class TableActor:
                 "actions": [],
                 "rewards": [],
                 "sample_weights": [],
+                "hand_memories": [],
+                "game_memories": []
             }
         self._reset_current_hand()
 
@@ -134,7 +156,12 @@ class TableActor:
                 "current_actors": [],
                 "actions": [],
                 "sample_weights": [],
+                "hand_memories": [],
+                "game_memories": []
             }
+        if IS_RECURRENT:
+            # we reset the hand memories
+            self.hand_memories = [player.init_hand_memory(batch_size=1) for player in self.trainable_players]
 
     def _take_action(self, state, player_action):
         # we convert the action into something we can use
@@ -147,8 +174,6 @@ class TableActor:
             max_bet = min_bet  # Or some other logical fallback
 
         interpreted_action, bet_sizing = self.action_interpreter(player_action, min_bet, max_bet)
-        # if self.num_games_played < 1:
-            # print(player_action[0].item(), interpreted_action)
 
         if interpreted_action == Action.CHECK_OR_FOLD:
             if state.can_check_or_call() and state.checking_or_calling_amount == 0:
@@ -374,9 +399,7 @@ class TableActor:
                 snapshot = extract_state_snapshot(state, current_actor)
 
                 try:
-                   with torch.no_grad():
-                        player_action_tensor = player.get_action((snapshot, current_actor))
-                        player_action = player_action_tensor.detach().cpu().squeeze(0)
+                    player_action = self._get_action(player, snapshot, current_actor)
                 except Exception as e:
                     print("linear_round", state)
                     raise e
@@ -442,6 +465,17 @@ class TableActor:
         except Exception as e:
             print(f"Exception: {e} encountered in Table {self.table_id} in linear round fn")
             return True  # terminate the table to avoid players from getting stuck in the void
+
+    def _get_action(self, player, snapshot, current_actor, hand_hidden=None, game_hidden=None):
+        with torch.no_grad():
+            if IS_RECURRENT:
+                player_action_tensor, new_hand_hidden = player.get_action((snapshot, current_actor), hand_hidden, game_hidden)
+                player_action = player_action_tensor.detach().cpu().squeeze(0)
+                return player_action, new_hand_hidden
+            else:
+                player_action_tensor = player.get_action((snapshot, current_actor))
+                player_action = player_action_tensor.detach().cpu().squeeze(0)
+                return player_action
 
     def play_game(self):
         try:
@@ -511,7 +545,7 @@ class TableActor:
                     players = ray.get(data["player_refs"])
                     self.current_player_versions = data["player_versions"]
 
-                    player_params_list = [player.get_params() for player in players]
+                    # player_params_list = [player.get_params() for player in players]
 
                     session_hand_info = {
                         pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": []}
@@ -522,9 +556,10 @@ class TableActor:
                     for _ in range(self.replay):
                         shuffle = list(range(len(player_ids)))
                         random.shuffle(shuffle)
-                        shuffled_player_params_list = [player_params_list[i] for i in shuffle]
+                        # shuffled_player_params_list = [player_params_list[i] for i in shuffle]
+                        shuffled_players = [players[i] for i in shuffle]
                         shuffled_player_ids = [player_ids[i] for i in shuffle]
-                        self.reset(shuffled_player_params_list, shuffled_player_ids, **data["table_params"])
+                        self.reset(shuffled_players, shuffled_player_ids, **data["table_params"])
                         success = self.play_game()
 
                         if success:

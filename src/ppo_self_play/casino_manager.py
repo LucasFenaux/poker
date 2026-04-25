@@ -8,73 +8,16 @@ import os
 import torch
 import numpy as np
 
-from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED
+from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED, IS_RECURRENT
 from src.ppo_self_play.alg import PPO
 from src.ppo_self_play.trainer_actor import TrainerActor
 from src.ppo_self_play.table_actor import TableActor
 from src.ppo_self_play.leaderboard_actor import LeaderboardActor
+from src.ppo_self_play.data_storage import TransitionStorage, TrajectoryStorage
+from src.player_ai import PlayerAI
 import math
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
-
-
-class PlayerAI:
-    def __init__(self, models, optimizer_params=None):
-        self.models = models
-        self.optimizer_params = optimizer_params
-
-    def load_params(self, param_dicts):
-        for model, param_dict in zip(self.models, param_dicts):
-            model.load_state_dict(param_dict)
-
-    def get_params(self):
-        params = []
-        for model in self.models:
-            params.append(model.state_dict())
-        return params
-
-    def load_optimizers(self, optimizer_params):
-        self.optimizer_params = optimizer_params
-
-    def get_optimizer_params(self):
-        return self.optimizer_params
-
-
-# @ray.remote(num_cpus=0)
-class DataStorage:
-    # def __init__(self, in_queue, out_queue, player_ids, batch_size: int, on_policy):
-    def __init__(self, player_ids, batch_size: int, on_policy):
-        # self.in_queue = in_queue
-        # self.out_queue = out_queue
-        self.player_ids = player_ids
-        self.batch_size = batch_size
-        # self.states = {player_id: [] for player_id in self.player_ids}
-        # self.current_actors = {player_id: [] for player_id in self.player_ids}
-        # self.rewards = {player_id: [] for player_id in self.player_ids}
-        # self.actions = {player_id: [] for player_id in self.player_ids}
-        # self.sample_weights = {player_id: [] for player_id in self.player_ids}
-        self.num_samples = {player_id: 0 for player_id in player_ids}
-        self.samples = {player_id: [] for player_id in player_ids}
-        self.on_policy = on_policy
-
-    def add(self, player_id, hand_info_ref, num_samples):
-        self.num_samples[player_id] += num_samples
-        self.samples[player_id].append(hand_info_ref)
-        return self.can_train(player_id)
-
-    def can_train(self, player_id):
-        if self.num_samples[player_id] >= self.batch_size:
-            return True  # can train
-
-        return False
-
-    def get_batch(self, player_id):
-        assert self.num_samples[player_id] >= self.batch_size
-        samples = self.samples[player_id]
-        self.samples[player_id] = []
-        self.num_samples[player_id] = 0
-        # let the trainer handle extra data
-        return samples, self.num_samples[player_id]
 
 
 class JITTableScheduler:
@@ -358,7 +301,10 @@ class CasinoManager:
         for table in self.tables:
             table.start.remote()
 
-        self.data_storage = DataStorage(self.player_ids, self.batch_size, self.on_policy)
+        if IS_RECURRENT:
+            self.data_storage = TrajectoryStorage(self.player_ids, self.batch_size, self.log_folder)
+        else:
+            self.data_storage = TransitionStorage(self.player_ids, self.batch_size, self.on_policy)
 
         self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
         self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,

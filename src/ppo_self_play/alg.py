@@ -565,3 +565,51 @@ class PPOInferenceWrapper:
         else:
             dist: Normal = network(*state_args)
             return dist
+
+
+class RNNPPOInferenceWrapper(PPOInferenceWrapper):
+    def __init__(self, models, discrete: bool = False):
+        super().__init__(models, discrete)
+
+        self.hand_memory_size = self.network.hand_memory_size
+        self.game_memory_size = self.network.game_memory_size
+
+    def init_hand_memory(self, batch_size: int = 1):
+        return torch.zeros(batch_size, self.hand_memory_size, device=self.network.device)
+
+    def init_game_memory(self, batch_size: int = 1):
+        return torch.zeros(batch_size, self.game_memory_size, device=self.network.device)
+
+    # TODO: FINISH IMPLEMENTING WITH MEMORY
+
+
+class RNNPPO(PPO):
+    default_hyperparameters = {
+        "sgd_steps": 5,
+        "base_batch_size": 5000,
+        "mini_batch_size": 5000,
+        "clip_threshold": 0.2,
+        "target_kl": 0.01,
+        "lr": 1e-4,
+        "value_lr": 5e-4,
+        "reward_normalization_scaler": 1,
+        "entropy_coef": 5e-3,
+        "grad_clip_norm": 0.5,
+        "update_mode": "mini_batch"
+    }
+    key = "ppo"
+
+    def __init__(self, lr, device, value_lr, sgd_steps, clip_threshold, target_kl, reward_normalization_scaler,
+                 grad_clip_norm, entropy_coef, base_batch_size, mini_batch_size, update_mode, mode,
+                 discrete: bool = False):
+        super(PPO, self).__init__(lr, device)
+        self.hand_memory_sizes = [model.hand_memory_size for model in self.models]
+        self.game_memory_sizes = [model.game_memory_size for model in self.models]
+
+    def init_hand_memory(self, batch_size: int = 1):
+        return [torch.zeros(batch_size, self.hand_memory_sizes[i], device=model.device) for i, model in
+                enumerate(self.models)]
+
+    def init_game_memory(self, batch_size: int = 1):
+        return [torch.zeros(batch_size, self.game_memory_sizes[i], device=model.device) for i, model in
+                enumerate(self.models)]
