@@ -8,7 +8,7 @@ from torch.distributions import Categorical, Normal
 import pokerkit
 from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
-from src.state_interpreter import StatePreprocessor
+from src.state_interpreter import StatePreprocessor, safe_log, safe_lin_sqrt
 
 
 class BaseAlgorithm:
@@ -180,8 +180,10 @@ class PPO(OnPolicyAlgorithm):
             normalized_sample_weights = sample_weights / sample_weights.mean()
             prob_sample_weights = sample_weights / sample_weights.sum()
 
-        sign = torch.sign(batch_rewards)
-        batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
+        # undoing log-scaling of rewards as it was making the models unreasonably aggressive for small pots.
+
+        # sign = torch.sign(batch_rewards)
+        # batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
 
         with torch.no_grad():
             dist_old = self.get_model_policy(self.network, states, batch_rnn_states)

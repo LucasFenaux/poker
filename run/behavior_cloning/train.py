@@ -91,8 +91,10 @@ class PokerBehaviorCloningDataset(Dataset):
                 # 2. Extract Reward
                 # ==========================================
                 # Apply the same log-scaling to the rewards that you use in your PPO script
-                sign = 1 if reward >= 0 else -1
-                scaled_reward = sign * math.log(abs(reward) + 1)
+                # undoing the log scaling of the rewards just like the change in training
+                scaled_reward = reward
+                # sign = 1 if reward >= 0 else -1
+                # scaled_reward = sign * math.log(abs(reward) + 1)
                 self.rewards.append(scaled_reward)
 
                 # ==========================================
@@ -137,8 +139,8 @@ def train_for_one_epoch(model, value_model, optimizer, value_optimizer, train_lo
         rewards = rewards.to(device)
 
         # Apply the log-scaling dynamically on the GPU
-        sign = torch.sign(rewards)
-        rewards = sign * torch.log(rewards.abs() + 1)
+        # sign = torch.sign(rewards)
+        # rewards = sign * torch.log(rewards.abs() + 1)
 
         safe_targets = torch.clamp(targets, min=1e-5, max=1.0 - 1e-5)
 
@@ -284,6 +286,6 @@ if __name__ == '__main__':
     print("Pre-training complete! Ready for Self-Play.")
 
     # Save the models so PPO can load them
-    torch.save([model.state_dict(), value_model.state_dict()], "bc_pretrained_model.pt")
+    torch.save([model.state_dict(), value_model.state_dict()], "bc_pretrained_model_no_log.pt")
 
     evaluate_and_plot(model, train_loader, device, num_batches=10)
