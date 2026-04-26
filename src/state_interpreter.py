@@ -39,6 +39,17 @@ def safe_log(x):
     return x
 
 
+def safe_lin_sqrt(x):
+    if isinstance(x, torch.Tensor):
+        sign = torch.sign(x)
+        x = torch.where(x.abs() <= 1, x, sign * torch.sqrt(x.abs()))
+    else:
+        sign = sign_fn(x)
+        if math.fabs(x) > 1:
+            x = sign * math.sqrt(math.fabs(x))
+    return x
+
+
 @dataclass(slots=True)
 class StateSnapshot:
     hole_cards: str
@@ -144,9 +155,9 @@ class StatePreprocessor:
         features.extend([
             safe_div(sb, pot), safe_div(sb, bb), safe_div(bb, pot),
             safe_div(sb, min_bet), safe_div(bb, min_bet), safe_div(min_bet, pot),
-            safe_div(min_bet, max_bet), safe_log(safe_div(min_bet, bb)),
-            safe_div(sb, max_bet), safe_div(bb, max_bet), safe_log(safe_div(max_bet, bb)),
-            safe_div(pot, max_stack), safe_log(safe_div(pot, bb))
+            safe_div(min_bet, max_bet), safe_lin_sqrt(safe_div(min_bet, bb)),
+            safe_div(sb, max_bet), safe_div(bb, max_bet), safe_lin_sqrt(safe_div(max_bet, bb)),
+            safe_div(pot, max_stack), safe_lin_sqrt(safe_div(pot, bb))
         ])
 
         # Player-specific features
@@ -155,10 +166,10 @@ class StatePreprocessor:
                 bet, stack = bets[i], stacks[i]
                 features.extend([
                     safe_div(bet, stack), safe_div(bet, max_stack), safe_div(bet, pot),
-                    safe_div(sb, bet), safe_div(bb, bet), safe_log(safe_div(bet, bb)),
+                    safe_div(sb, bet), safe_div(bb, bet), safe_lin_sqrt(safe_div(bet, bb)),
                     safe_div(bet, min_bet), safe_div(bet, max_bet), safe_div(stack, max_stack),
                     safe_div(pot, stack), safe_div(sb, stack), safe_div(bb, stack),
-                    safe_div(min_bet, stack), safe_div(max_bet, stack), safe_log(safe_div(stack, bb))
+                    safe_div(min_bet, stack), safe_div(max_bet, stack), safe_lin_sqrt(safe_div(stack, bb))
                 ])
             else:
                 features.extend([0.0] * 15)

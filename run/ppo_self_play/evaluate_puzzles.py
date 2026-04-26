@@ -228,8 +228,9 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
                     policy = policy_net(puzzle.snapshot, puzzle.actor_index)
                     raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
 
-                    sign = 1.0 if raw_value_pred >= 0 else -1.0
-                    true_value_pred = sign * (np.exp(abs(raw_value_pred)) - 1.0)
+                    # sign = 1.0 if raw_value_pred >= 0 else -1.0
+                    # true_value_pred = sign * (np.exp(abs(raw_value_pred)) - 1.0)
+                    true_value_pred = raw_value_pred
 
                     alpha_val = policy.concentration1.squeeze()[0].item()
                     beta_val = policy.concentration0.squeeze()[0].item()

@@ -35,7 +35,7 @@ if __name__ == '__main__':
                  )
         device = torch.device("cpu")
         save_folder = get_save_folder()
-        bc_pretrained_model_path = "bc_pretrained_model.pt"
+        bc_pretrained_model_path = "bc_pretrained_model_no_log.pt"
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
                                                bc_pretrained_model_path=bc_pretrained_model_path)
         manager.start()
