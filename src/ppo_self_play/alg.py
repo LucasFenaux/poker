@@ -9,6 +9,7 @@ import pokerkit
 from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
 from src.state_interpreter import StatePreprocessor, safe_log, safe_lin_sqrt
+from src.models import HierarchicalPokerModel
 
 
 class BaseAlgorithm:
@@ -572,7 +573,7 @@ class PPOInferenceWrapper:
 class RNNPPOInferenceWrapper(PPOInferenceWrapper):
     def __init__(self, models, discrete: bool = False):
         super().__init__(models, discrete)
-
+        self.network: HierarchicalPokerModel
         self.hand_memory_size = self.network.hand_memory_size
         self.game_memory_size = self.network.game_memory_size
 
@@ -582,6 +583,9 @@ class RNNPPOInferenceWrapper(PPOInferenceWrapper):
     def init_game_memory(self, batch_size: int = 1):
         return torch.zeros(batch_size, self.game_memory_size, device=self.network.device)
 
+    def update_game_memory(self, final_hand_hidden: torch.Tensor, current_game_hidden: torch.Tensor):
+        new_game_hidden = self.network.update_game_memory(final_hand_hidden, current_game_hidden)
+        return new_game_hidden
     # TODO: FINISH IMPLEMENTING WITH MEMORY
 
 
