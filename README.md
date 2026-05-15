@@ -5,13 +5,17 @@ Tables and Trainers.
 We use docker to bypass the ray/mac M4 issue: https://github.com/ray-project/ray/issues/61495
 
 ## How to run
-To start the container
+To start the container for PPO self-play training. Adjust the settings in `src/ppo_self_play/global_settings.py`, then:
 
 `docker compose up --build`
 
 To end the container
 
 `docker compose down`
+
+If you want to pretrain the models using behavior cloning. Use the docker-compose file in the `run/behavior_cloning/` folder 
+to generate the data and the `run/behavior_cloning/train.py` script to pre-train the PPO actors. Make sure to properly specify
+the model path in `run/ppo_self_play/main.py` to ensure it is using the pre-trained model.
 
 ## Logging
 ### Leaderboard
@@ -30,7 +34,8 @@ and open http://localhost:6006 on your browser
 
 Open http://localhost:8265 on your browser
 
+### Get results from the Docker container
+The `get_from_docker` fetches the run results and models.
 
-[//]: # (`docker build -t poker-casino . ` )
-[//]: # ()
-[//]: # (`docker run -it --rm --shm-size="8g" -p 10001:10001 -p 6379:6379 -p 8265:8265 -v "$&#40;pwd&#41;/results:/app/results" poker-casino`)
+### Play with your Poker AI
+The `run\app\run.py` script launches a small poker app UI to play poker with one of your pre-trained AIs.
