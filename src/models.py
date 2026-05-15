@@ -72,8 +72,8 @@ class PokerModel(nn.Module):
             beta = F.softplus(self.beta_net(feature_embedding)) + 1e-5
             # alpha = torch.clamp(alpha, min=0.01, max=50.0)
             # beta = torch.clamp(beta, min=0.01, max=50.0)
-            alpha = torch.clamp(alpha, min=0.01, max=500.0)
-            beta = torch.clamp(beta, min=0.01, max=500.0)
+            # alpha = torch.clamp(alpha, min=0.01, max=500.0)
+            # beta = torch.clamp(beta, min=0.01, max=500.0)
             dist = Beta(alpha, beta)
             return dist
 
