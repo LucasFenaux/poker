@@ -1,6 +1,7 @@
 import random
 import threading
 import time
+import traceback
 
 import ray
 from ray.util.queue import Queue, Empty
@@ -9,12 +10,12 @@ import torch
 import numpy as np
 
 from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED, IS_RECURRENT
-from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.alg import PPO, RNNPPO
 from src.ppo_self_play.trainer_actor import TrainerActor
 from src.ppo_self_play.table_actor import TableActor
 from src.ppo_self_play.leaderboard_actor import LeaderboardActor
-from src.ppo_self_play.data_storage import TransitionStorage, TrajectoryStorage
-from src.player_ai import PlayerAI
+from src.ppo_self_play.data_storage import DataStorage
+from src.player_ai import PlayerAI, RNNPlayerAI
 import math
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
@@ -237,98 +238,106 @@ class PlanTableScheduler:
 class CasinoManager:
     def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
                  bc_pretrained_model_path: str = None):
-        self.player_ids = list(range(NUM_PLAYERS))
-        self.device = device
-        self.save_folder = save_folder
-        os.makedirs(self.save_folder, exist_ok=True)
-        self.player_save_folder = os.path.join(save_folder, "players")
-        os.makedirs(self.player_save_folder, exist_ok=True)
-        self.log_folder = os.path.join(save_folder, "logs")
-        self.mode = "beta"
+        try:
+            self.player_ids = list(range(NUM_PLAYERS))
+            self.device = device
+            self.save_folder = save_folder
+            os.makedirs(self.save_folder, exist_ok=True)
+            self.player_save_folder = os.path.join(save_folder, "players")
+            os.makedirs(self.player_save_folder, exist_ok=True)
+            self.log_folder = os.path.join(save_folder, "logs")
+            self.mode = "beta"
 
-        manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
-        self.writer = SummaryWriter(log_dir=manager_log_path)
-        self.timer = SemanticTimer()
-        self.loop_step = 0
+            manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
+            self.writer = SummaryWriter(log_dir=manager_log_path)
+            self.timer = SemanticTimer()
+            self.loop_step = 0
 
-        # player trackers
-        self.is_playing = {player_id: False for player_id in self.player_ids}
-        self.is_training = {player_id: False for player_id in self.player_ids}
-        self.is_playing_against = {player_id: [] for player_id in self.player_ids}
-        self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
-        self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
-        self.last_timeout_check = time.time()
+            # player trackers
+            self.is_playing = {player_id: False for player_id in self.player_ids}
+            self.is_training = {player_id: False for player_id in self.player_ids}
+            self.is_playing_against = {player_id: [] for player_id in self.player_ids}
+            self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
+            self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
+            self.last_timeout_check = time.time()
 
-        # we spin up the player models
-        self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
-                        self.player_ids]
-        if bc_pretrained_model_path is not None:
-            print(f"Loading pretrained model from {bc_pretrained_model_path}")
-            # load the model
-            param_dicts = torch.load(bc_pretrained_model_path, map_location=torch.device("cpu"), weights_only=True)
+            # we spin up the player models
+            if IS_RECURRENT:
+                self.players = [ray.put(RNNPlayerAI(RNNPPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                                self.player_ids]
+            else:
+                self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                                self.player_ids]
+            if bc_pretrained_model_path is not None:
+                print(f"Loading pretrained model from {bc_pretrained_model_path}")
+                # load the model
+                param_dicts = torch.load(bc_pretrained_model_path, map_location=torch.device("cpu"), weights_only=True)
 
-            loaded_players = []
-            for player in self.players:
-                player: PlayerAI = ray.get(player)
-                player.load_params(param_dicts)
-                loaded_players.append(ray.put(player))
+                loaded_players = []
+                for player in self.players:
+                    player: PlayerAI = ray.get(player)
+                    player.load_params(param_dicts)
+                    loaded_players.append(ray.put(player))
 
-            self.players = loaded_players
+                self.players = loaded_players
 
-        self.player_training_counts = [0] * len(self.player_ids)
+            self.player_training_counts = [0] * len(self.player_ids)
 
-        self.table_max_size = 2
-        self.table_min_size = 2
-        self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
-        self.on_policy = True
+            self.table_max_size = 2
+            self.table_min_size = 2
+            if IS_RECURRENT:
+                self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
+            else:
+                self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
+            self.on_policy = True
 
-        # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
-        self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+            # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+            self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
-        self.table_send_queue = Queue(maxsize=0)
-        self.table_receive_queue = Queue(maxsize=0)
+            self.table_send_queue = Queue(maxsize=0)
+            self.table_receive_queue = Queue(maxsize=0)
 
-        self.trainer_send_queue = Queue(maxsize=0)
-        self.trainer_receive_queue = Queue(maxsize=0)
+            self.trainer_send_queue = Queue(maxsize=0)
+            self.trainer_receive_queue = Queue(maxsize=0)
 
-        # max_tables_needed = len(self.player_ids) // self.table_min_size
-        print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
-              f"{self.table_max_size}...")
-        self.table_ids = [table_id for table_id in range(NUM_TABLES)]
-        self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
-                                         self.table_max_size, discrete, self.mode,
-                                         self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
-        for table in self.tables:
-            table.start.remote()
+            # max_tables_needed = len(self.player_ids) // self.table_min_size
+            print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
+                  f"{self.table_max_size}...")
+            self.table_ids = [table_id for table_id in range(NUM_TABLES)]
+            self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
+                                             self.table_max_size, discrete, self.mode,
+                                             self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+            for table in self.tables:
+                table.start.remote()
 
-        if IS_RECURRENT:
-            self.data_storage = TrajectoryStorage(self.player_ids, self.batch_size, self.log_folder)
-        else:
-            self.data_storage = TransitionStorage(self.player_ids, self.batch_size, self.on_policy)
+            self.data_storage = DataStorage(self.player_ids, self.batch_size, self.log_folder)
 
-        self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
-        self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
-                                             self.log_folder, self.player_save_folder, self.mode)
-                         for i in self.trainer_ids]
-        for trainer in self.trainers:
-            trainer.start.remote()
+            self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
+            self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
+                                                 self.log_folder, self.player_save_folder, self.mode)
+                             for i in self.trainer_ids]
+            for trainer in self.trainers:
+                trainer.start.remote()
 
-        self.leaderboard_queue = Queue(maxsize=0)
-        # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
-        self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
-            self.leaderboard_queue, self.table_send_queue, self.table_receive_queue, self.trainer_send_queue,
-            self.trainer_receive_queue, self.player_ids, save_folder)
+            self.leaderboard_queue = Queue(maxsize=0)
+            # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
+            self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
+                self.leaderboard_queue, self.table_send_queue, self.table_receive_queue, self.trainer_send_queue,
+                self.trainer_receive_queue, self.player_ids, save_folder)
 
-        self.leaderboard.start.remote()
+            self.leaderboard.start.remote()
 
-        self.discrete = discrete
-        # min and max stack params are defined in terms of # of big blinds
-        self.min_stack = 100
-        self.max_stack = 100
-        self.min_bb_ratio = 2
-        self.max_bb_ratio = 2
-        self.min_allowed_start_bb = 10
-        self.stop_event = threading.Event()
+            self.discrete = discrete
+            # min and max stack params are defined in terms of # of big blinds
+            self.min_stack = 100
+            self.max_stack = 100
+            self.min_bb_ratio = 2
+            self.max_bb_ratio = 2
+            self.min_allowed_start_bb = 10
+            self.stop_event = threading.Event()
+        except Exception as e:
+            traceback.print_exc()
+            raise e
 
     def rescue_ghost_players(self):
         """Periodically checks for players stuck in a playing or training state."""

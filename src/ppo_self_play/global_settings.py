@@ -10,7 +10,7 @@ import os
 NUM_CPUS=os.environ.get("RAY_NUM_CPUS",10)
 NUM_GPUS=0
 MAX_TABLE_SIZE=2
-IS_RECURRENT=False
+IS_RECURRENT=True
 
 # local settings
 # NUM_PLAYERS=10

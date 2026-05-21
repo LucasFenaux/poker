@@ -11,11 +11,11 @@ import random
 import torch
 from src.action_interpreter import ActionInterpreter, Action
 from src.state_interpreter import extract_state_snapshot
-from src.ppo_self_play.alg import PPOInferenceWrapper, PPO
+from src.ppo_self_play.alg import PPOInferenceWrapper, PPO, RNNPPOInferenceWrapper, RNNPPO
 from src.player_ai import PlayerAI, RNNPlayerAI
 from src.shared import SemanticTimer
 from src.ppo_self_play.global_settings import IS_RECURRENT
-from src.ppo_self_play.alg import RNNPPOInferenceWrapper
+import traceback
 
 
 @ray.remote(num_cpus=0)
@@ -47,6 +47,7 @@ class TableActor:
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
         self.replay = 1  # not really necessary with tree game. Useful with linear game.
+        self.linear_replay = 10
         self.tree_expansion = 3   # good options are 3, 4, 5
         self.use_early_stopping = True
         self.batch_size = batch_size
@@ -58,8 +59,12 @@ class TableActor:
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None   # table facing view
         self.game_player_ids = None   # game state facing view
-        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                        for _ in range(max_table_size)]
+        if IS_RECURRENT:
+            self.players = [RNNPPOInferenceWrapper(RNNPPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+                            for _ in range(max_table_size)]
+        else:
+            self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+                            for _ in range(max_table_size)]
         self.game_players = self.players[:]
         self.trainable_players = None
         self.params = None
@@ -88,13 +93,18 @@ class TableActor:
         if IS_RECURRENT:
             for player in players:
                 assert isinstance(player, RNNPlayerAI)
-            self.game_memories = [player.init_game_memory(batch_size=1) for player in players]
-            self.hand_memories = [player.init_hand_memory(batch_size=1) for player in players]
+            self.game_memories = {pid: player.init_game_memory(batch_size=1) for pid, player in
+                                  zip(player_ids, players)}
+            self.hand_memories = {pid: player.init_hand_memory(batch_size=1) for pid, player in
+                                  zip(player_ids, players)}
 
         self.player_winnings = {player_id: 0.0 for player_id in self.player_ids}
-
-        self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                        for _ in range(len(player_ids))]
+        if IS_RECURRENT:
+            self.players = [RNNPPOInferenceWrapper(RNNPPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+                            for _ in range(len(player_ids))]
+        else:
+            self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+                            for _ in range(len(player_ids))]
         self.game_players = self.players[:]
 
         for i, (player, player_params) in enumerate(zip(self.players, players_params_list)):
@@ -145,7 +155,8 @@ class TableActor:
                 "rewards": [],
                 "sample_weights": [],
                 "hand_memories": [],
-                "game_memories": []
+                "game_memories": [],
+                "new_hands": []
             }
         self._reset_current_hand()
 
@@ -158,11 +169,13 @@ class TableActor:
                 "actions": [],
                 "sample_weights": [],
                 "hand_memories": [],
-                "game_memories": []
+                "game_memories": [],
+                "new_hands": []
             }
         if IS_RECURRENT:
             # we reset the hand memories
-            self.hand_memories = [player.init_hand_memory(batch_size=1) for player in self.trainable_players]
+            self.hand_memories = {pid: player.init_hand_memory(batch_size=1) for pid, player in
+                                  zip(self.game_player_ids, self.game_players)}
 
     def _take_action(self, state, player_action):
         # we convert the action into something we can use
@@ -233,6 +246,8 @@ class TableActor:
                 except Exception as e:
                     # print(state)
                     print("tree_level", e)
+                    if self.table_id == 0:
+                        traceback.print_exc()
                     raise e
 
                 # we log the state and action for player training
@@ -372,6 +387,8 @@ class TableActor:
         except Exception as e:
             # raise e
             print(f"Exception: {e} encountered in Table {self.table_id} in tree round fn")
+            if self.table_id == 0:
+                traceback.print_exc()
             return True
 
     def _play_linear_round(self):
@@ -411,15 +428,20 @@ class TableActor:
                                                      game_hidden=game_memory)
                 except Exception as e:
                     print("linear_round", state)
+                    if self.table_id == 0:
+                        traceback.print_exc()
                     raise e
 
                 # we log the state and action for player training
+                is_new_hand = True if len(self.current_hand[player_id]["states"]) == 0 else False
+                self.current_hand[player_id]["new_hands"].append(is_new_hand)
+
                 self.current_hand[player_id]["states"].append(snapshot)
                 self.current_hand[player_id]["current_actors"].append(current_actor)
                 self.current_hand[player_id]["actions"].append(player_action)
                 self.current_hand[player_id]["sample_weights"].append(1.)
-                self.current_hand[player_id]["hand_memory"].append(hand_memory)
-                # self.current_hand[player_id]["game_memory"].append(game_memory)
+                self.current_hand[player_id]["hand_memories"].append(hand_memory)
+                # self.current_hand[player_id]["game_memories"].append(game_memories)
 
                 self._take_action(state, player_action)
                 self.hand_memories[player_id] = new_hand_memory
@@ -430,7 +452,7 @@ class TableActor:
                     last_hand_memory = self.hand_memories[player_id]
                     player: RNNPPOInferenceWrapper
                     new_game_memory = player.update_game_memory(last_hand_memory, game_memory)
-                    self.current_hand[player_id]["game_memory"] = game_memory  # we only update it once per hand so only need to store one instance
+                    self.current_hand[player_id]["game_memories"] = game_memory  # we only update it once per hand so only need to store one instance
                     self.game_memories[player_id] = new_game_memory
 
             # compute rewards
@@ -443,23 +465,25 @@ class TableActor:
                 # save the hand info
                 player_id = self.game_player_ids[i]
                 hand_rewards = [reward] * len(self.current_hand[player_id]["states"])
-                if IS_RECURRENT:
-                    # we want to keep the hand structure so we append rather than extend
-                    self.hand_info[player_id]["states"].append(self.current_hand[player_id]["states"])
-                    self.hand_info[player_id]["current_actors"].append(self.current_hand[player_id]["current_actors"])
-                    self.hand_info[player_id]["actions"].append(self.current_hand[player_id]["actions"])
-                    self.hand_info[player_id]["rewards"].append(hand_rewards)
-                    self.hand_info[player_id]["sample_weights"].append(self.current_hand[player_id]["sample_weights"])
-                    self.hand_info[player_id]["hand_memory"].append(self.current_hand[player_id]["hand_memory"])
-                    self.hand_info[player_id]["game_memory"].append(self.current_hand[player_id]["game_memory"])
-                else:
-                    self.hand_info[player_id]["states"].extend(self.current_hand[player_id]["states"])
-                    self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
-                    self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
-                    self.hand_info[player_id]["rewards"].extend(hand_rewards)
-                    self.hand_info[player_id]["sample_weights"].extend(self.current_hand[player_id]["sample_weights"])
-                    self.hand_info[player_id]["hand_memory"].extend(self.current_hand[player_id]["hand_memory"])
-                    self.hand_info[player_id]["game_memory"].extend([self.current_hand[player_id]["game_memory"],])
+                # if IS_RECURRENT:
+                #     # we want to keep the hand structure so we append rather than extend
+                #     self.hand_info[player_id]["states"].append(self.current_hand[player_id]["states"])
+                #     self.hand_info[player_id]["current_actors"].append(self.current_hand[player_id]["current_actors"])
+                #     self.hand_info[player_id]["actions"].append(self.current_hand[player_id]["actions"])
+                #     self.hand_info[player_id]["rewards"].append(hand_rewards)
+                #     self.hand_info[player_id]["sample_weights"].append(self.current_hand[player_id]["sample_weights"])
+                #     self.hand_info[player_id]["hand_memories"].append(self.current_hand[player_id]["hand_memories"])
+                #     self.hand_info[player_id]["game_memories"].append(self.current_hand[player_id]["game_memories"])
+                # else:
+                self.hand_info[player_id]["states"].extend(self.current_hand[player_id]["states"])
+                self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
+                self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
+                self.hand_info[player_id]["rewards"].extend(hand_rewards)
+                self.hand_info[player_id]["sample_weights"].extend(self.current_hand[player_id]["sample_weights"])
+                self.hand_info[player_id]["hand_memories"].extend(self.current_hand[player_id]["hand_memories"])
+                self.hand_info[player_id]["game_memories"].extend([self.current_hand[player_id]["game_memories"],])
+
+                self.hand_info[player_id]["new_hands"].extend(self.current_hand[player_id]["new_hands"])
 
                 if final_game_stack < self.game_params["min_bet"]:
                     # player is busted out
@@ -496,6 +520,8 @@ class TableActor:
 
         except Exception as e:
             print(f"Exception: {e} encountered in Table {self.table_id} in linear round fn")
+            if self.table_id == 0:
+                traceback.print_exc()
             return True  # terminate the table to avoid players from getting stuck in the void
 
     def _get_action(self, player, snapshot, current_actor, hand_hidden=None, game_hidden=None):
@@ -581,12 +607,12 @@ class TableActor:
 
                     session_hand_info = {
                         pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": [],
-                              "hand_memory": [], "game_memory": []}
+                              "hand_memories": [], "game_memories": [], "new_hands": []}
                         for pid in player_ids
                     }
                     session_player_winnings = {pid: 0.0 for pid in player_ids}
 
-                    for _ in range(self.replay):
+                    for _ in range(self.linear_replay if IS_RECURRENT else self.replay):
                         shuffle = list(range(len(player_ids)))
                         random.shuffle(shuffle)
                         # shuffled_player_params_list = [player_params_list[i] for i in shuffle]
@@ -606,33 +632,37 @@ class TableActor:
                                     session_hand_info[pid]["actions"].append(self.hand_info[pid]["actions"])
                                     session_hand_info[pid]["rewards"].append(self.hand_info[pid]["rewards"])
                                     session_hand_info[pid]["sample_weights"].append(self.hand_info[pid]["sample_weights"])
-                                    session_hand_info[pid]["hand_memory"].append(self.hand_info[pid]["hand_memory"])
-                                    session_hand_info[pid]["game_memory"].append(self.hand_info[pid]["game_memory"])
+                                    session_hand_info[pid]["hand_memories"].append(self.hand_info[pid]["hand_memories"])
+                                    session_hand_info[pid]["game_memories"].append(self.hand_info[pid]["game_memories"])
+                                    session_hand_info[pid]["new_hands"].append(self.hand_info[pid]["new_hands"])
                                 else:
                                     session_hand_info[pid]["states"].extend(self.hand_info[pid]["states"])
                                     session_hand_info[pid]["current_actors"].extend(self.hand_info[pid]["current_actors"])
                                     session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
                                     session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
                                     session_hand_info[pid]["sample_weights"].extend(self.hand_info[pid]["sample_weights"])
-                                    session_hand_info[pid]["hand_memory"].extend(self.hand_info[pid]["hand_memory"])
-                                    session_hand_info[pid]["game_memory"].extend([self.hand_info[pid]["game_memory"],])
-
+                                    session_hand_info[pid]["hand_memories"].extend(self.hand_info[pid]["hand_memories"])
+                                    session_hand_info[pid]["game_memories"].extend([self.hand_info[pid]["game_memories"],])
+                                    session_hand_info[pid]["new_hands"].extend(self.hand_info[pid]["new_hands"])
                                 session_player_winnings[pid] += self.player_winnings[pid]
 
                     batch = []
                     # Send the batched data exactly once per session
-                    num_samples = []
                     for pid in player_ids:
                         p_index = player_ids.index(pid)
                         p_version = self.current_player_versions[p_index]
-                        num_samples.append(len(session_hand_info[pid]["states"]))
+                        if IS_RECURRENT:
+                            num_samples = sum([len(session_hand_info[pid]["states"][i]) for i in range(len(session_hand_info[pid]["states"]))])
+                        else:
+                            num_samples = len(session_hand_info[pid]["states"])
+
                         batch.append({
                             "type": "data",
                             "table_id": self.table_id,
                             "player_id": pid,
                             "hand_info": ray.put(session_hand_info[pid]),
                             "player_winnings": session_player_winnings[pid],
-                            "num_samples": len(session_hand_info[pid]["states"]),
+                            "num_samples": num_samples,
                             "version": p_version
                         })
                     # now we send back the players
@@ -648,6 +678,8 @@ class TableActor:
 
                 except Exception as e:
                     print(f"Exception: {e} encountered in Table {self.table_id} in start fn")
+                    if self.table_id == 0:
+                        traceback.print_exc()
                     batch = []
 
                     # now we send back the players

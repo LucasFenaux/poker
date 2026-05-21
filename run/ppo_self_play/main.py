@@ -5,6 +5,7 @@ from datetime import datetime
 import uuid
 
 from src.ppo_self_play.casino_manager import CasinoManager
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 def get_save_folder(base_path="results"):
@@ -35,7 +36,7 @@ if __name__ == '__main__':
                  )
         device = torch.device("cpu")
         save_folder = get_save_folder()
-        bc_pretrained_model_path = "bc_pretrained_model_no_log.pt"
+        bc_pretrained_model_path = f"bc_pretrained_model_no_log_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
                                                bc_pretrained_model_path=bc_pretrained_model_path)
         manager.start()

@@ -7,8 +7,9 @@ import random
 
 # --- Local Project Imports ---
 from src.app.play_vs_ai import HumanAIPokerManager
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
+from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
 from src.app.play_gui import PokerGameGUI
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 def get_latest_run_folder(base_path="results"):
@@ -29,7 +30,10 @@ def load_poker_ai(model_path, device):
     models = PPO.init_networks(device, mode="beta", discrete=False)
 
     # 2. Wrap them in the Inference Wrapper for gameplay
-    ai_player = PPOInferenceWrapper(models, discrete=False)
+    if IS_RECURRENT:
+        ai_player = RNNPPOInferenceWrapper(models, discrete=False)
+    else:
+        ai_player = PPOInferenceWrapper(models, discrete=False)
 
     # 3. Load the full checkpoint saved by the trainer
     # Set weights_only=False if your optimizer states contain complex objects that throw warnings

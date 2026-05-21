@@ -10,7 +10,8 @@ from pokerkit import NoLimitTexasHoldem, Automation, State, calculate_equities, 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import ActionInterpreter, Action
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
+from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 # --- 1. Baseline Bot Logic ---
@@ -93,8 +94,13 @@ def get_latest_run_folder(base_path="results"):
 
 
 def load_ai_player(model_path, device):
-    models = PPO.init_networks(device, mode="beta", discrete=False)
-    ai_player = PPOInferenceWrapper(models, discrete=False)
+    # FIX: Correctly instantiate the RNN model if running in recurrent mode!
+    if IS_RECURRENT:
+        models = RNNPPO.init_networks(device, mode="beta", discrete=False)
+        ai_player = RNNPPOInferenceWrapper(models, discrete=False)
+    else:
+        models = PPO.init_networks(device, mode="beta", discrete=False)
+        ai_player = PPOInferenceWrapper(models, discrete=False)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
 
@@ -156,6 +162,12 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
             player_count=current_table_size
         )
 
+        if IS_RECURRENT:
+            hand_hidden = ai_player.init_hand_memory(batch_size=1)
+            game_hidden = ai_player.init_game_memory(batch_size=1)
+        else:
+            hand_hidden, game_hidden = None, None
+
         while state.status:
             actor = state.actor_index
 
@@ -163,7 +175,13 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
                 # --- AI TURN ---
                 snapshot = extract_state_snapshot(state, actor)
                 with torch.no_grad():
-                    action_tensor = ai_player.get_action((snapshot, actor)).squeeze(0)
+                    if IS_RECURRENT:
+                        action_tensor, hand_hidden = ai_player.get_action(
+                            (snapshot, actor), hand_hidden=hand_hidden, game_hidden=game_hidden
+                        )
+                        action_tensor = action_tensor.squeeze(0)
+                    else:
+                        action_tensor = ai_player.get_action((snapshot, actor)).squeeze(0)
 
                 s_min_bet = state.min_completion_betting_or_raising_to_amount or max(state.bets)
                 s_max_bet = state.max_completion_betting_or_raising_to_amount or s_min_bet
@@ -218,7 +236,8 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
 
 def evaluate_agent(num_games, run_folder, player_id, max_table_size, explicit_model_path=None):
     device = torch.device("cpu")
-    action_interpreter = ActionInterpreter()
+    # FIX: Initialize ActionInterpreter with explicit beta mode!
+    action_interpreter = ActionInterpreter("beta")
     baseline_bot = FastBaselineBot(player_index=0)
 
     # Use the explicit path if provided, otherwise reconstruct the normal PPO run folder path

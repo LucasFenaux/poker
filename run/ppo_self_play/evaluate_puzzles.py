@@ -14,7 +14,8 @@ from pokerkit import calculate_equities, parse_range, Deck, StandardHighHand, Ca
 from src.state_interpreter import StateSnapshot
 from src.action_interpreter import ActionInterpreter, Action
 from evaluate import get_latest_run_folder
-from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 @dataclass
@@ -29,26 +30,32 @@ class PokerPuzzle:
 
 
 def load_eval_models(model_path, device):
-    """Custom loader that extracts BOTH the Policy and Value networks."""
-    policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
+    """Custom loader that extracts BOTH the Wrapper and Value networks."""
+    # ---> NEW: Branch network initialization <---
+    if IS_RECURRENT:
+        policy_net, value_net = RNNPPO.init_networks(device, mode="beta", discrete=False)
+        wrapper = RNNPPOInferenceWrapper((policy_net,), discrete=False)
+    else:
+        policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
+        wrapper = PPOInferenceWrapper((policy_net,), discrete=False)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
 
-    # Handle both PPO tuple format and pure BC list format smoothly
     if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
         checkpoint = loaded_data[0]
     else:
         checkpoint = loaded_data
+    if IS_RECURRENT:
+        wrapper.load_params(checkpoint)
+    else:
+        wrapper.load_params((checkpoint[0],))
+    wrapper.to(device)
 
-    policy_net.load_state_dict(checkpoint[0])
     value_net.load_state_dict(checkpoint[1])
-
-    policy_net.to(device)
     value_net.to(device)
-    policy_net.eval()
     value_net.eval()
 
-    return policy_net, value_net
+    return wrapper, value_net
 
 
 def build_puzzle_suite() -> list[PokerPuzzle]:
@@ -230,8 +237,28 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
 
             for puzzle in puzzles:
                 with torch.no_grad():
-                    policy = policy_net(puzzle.snapshot, puzzle.actor_index)
-                    raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
+                    # policy = policy_net(puzzle.snapshot, puzzle.actor_index)
+                    if IS_RECURRENT:
+                        policy, _ = policy_net.get_model_policy(policy_net.network, (puzzle.snapshot, puzzle.actor_index))
+                    else:
+                        policy = policy_net.get_model_policy(policy_net.network, (puzzle.snapshot, puzzle.actor_index))
+
+                    # Preprocess state properly for the value net
+                    batched_dict = policy_net.preprocess_batch([puzzle.snapshot], [puzzle.actor_index])
+
+                    if IS_RECURRENT:
+                        # Initialize empty hidden states for a single isolated snapshot
+                        h_0 = torch.zeros(1, value_net.hand_memory_size, device=device)
+                        g_0 = torch.zeros(1, value_net.game_memory_size, device=device)
+
+                        # The recurrent value net returns a tuple: (value_prediction, new_hidden_state)
+                        val_tensor, _ = value_net(batched_dict, hand_hidden=h_0, game_hidden=g_0)
+                        raw_value_pred = val_tensor.item()
+                    else:
+                        # Standard PPO value net just returns the value tensor
+                        raw_value_pred = value_net(batched_dict).item()
+
+                    # raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
 
                     true_value_pred = raw_value_pred
 

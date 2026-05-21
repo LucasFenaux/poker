@@ -162,13 +162,14 @@ class HierarchicalPokerModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
-
-        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=64)
-        self.game_gry = nn.GRUCell(input_size=128, hidden_size=32)
+        self.hand_memory_size = 64
+        self.game_memory_size = 32
+        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=self.hand_memory_size)
+        self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
 
         self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
-                                 nn.Linear(256, 128), nn.GELU(),
-                                 nn.Linear(128, 128), nn.GELU(),)
+                                 nn.Linear(256, 128), nn.GELU(),)
+                                 # nn.Linear(128, 128), nn.GELU(),)
 
         self.policy_mlp = nn.Sequential(
             nn.Linear(128+64+32, 128), nn.GELU(),
@@ -259,12 +260,14 @@ class HierarchicalValueModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
 
-        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=64)
-        self.game_gry = nn.GRUCell(input_size=128, hidden_size=32)
+        self.hand_memory_size = 64
+        self.game_memory_size = 32
+        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=self.hand_memory_size)
+        self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
 
         self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
-                                 nn.Linear(256, 128), nn.GELU(),
-                                 nn.Linear(128, 128), nn.GELU(),)
+                                 nn.Linear(256, 128), nn.GELU(),)
+                                 # nn.Linear(128, 128), nn.GELU(),)
 
         self.value_head = nn.Sequential(
             nn.Linear(128+64+32, 128), nn.GELU(),

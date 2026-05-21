@@ -9,8 +9,9 @@ from pokerkit import NoLimitTexasHoldem, Automation
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import ActionInterpreter, Action
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
+from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
 from evaluate import get_latest_run_folder
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 def flatten_cards(cards):
@@ -41,10 +42,20 @@ def load_all_models(run_folder, device):
     for model_path in model_files:
         player_id = os.path.splitext(os.path.basename(model_path))[0]
         # Initialize bare network
-        models = PPO.init_networks(device, mode="beta", discrete=False)
-        ai_player = PPOInferenceWrapper(models, discrete=False)
-        # Load weights
-        checkpoint, _ = torch.load(model_path, map_location=device, weights_only=True)
+        if IS_RECURRENT:
+            models = RNNPPO.init_networks(device, mode="beta", discrete=False)
+            ai_player = RNNPPOInferenceWrapper(models, discrete=False)
+        else:
+            models = PPO.init_networks(device, mode="beta", discrete=False)
+            ai_player = PPOInferenceWrapper(models, discrete=False)
+
+        # FIX: Safe extraction of tuple from torch.load
+        loaded_data = torch.load(model_path, map_location=device, weights_only=True)
+        if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+            checkpoint = loaded_data[0]
+        else:
+            checkpoint = loaded_data
+
         ai_player.load_params(checkpoint)
         ai_player.to(device)
         population[player_id] = ai_player
@@ -79,6 +90,14 @@ def play_tournament_hand(player_ids, population, action_interpreter, small_blind
         player_count=len(player_ids)
     )
 
+    hand_memories = {pid: None for pid in player_ids}
+    game_memories = {pid: None for pid in player_ids}
+
+    if IS_RECURRENT:
+        for pid in player_ids:
+            hand_memories[pid] = population[pid].init_hand_memory(batch_size=1)
+            game_memories[pid] = population[pid].init_game_memory(batch_size=1)
+
     while state.status:
         actor_idx = state.actor_index
         pid = player_ids[actor_idx]
@@ -86,7 +105,15 @@ def play_tournament_hand(player_ids, population, action_interpreter, small_blind
 
         snapshot = extract_state_snapshot(state, actor_idx)
         with torch.no_grad():
-            action_tensor = ai_player.get_action((snapshot, actor_idx))
+            if IS_RECURRENT:
+                action_tensor, new_hand = ai_player.get_action(
+                    (snapshot, actor_idx),
+                    hand_hidden=hand_memories[pid],
+                    game_hidden=game_memories[pid]
+                )
+                hand_memories[pid] = new_hand  # Store for their next turn!
+            else:
+                action_tensor = ai_player.get_action((snapshot, actor_idx))
 
         s_min_bet = state.min_completion_betting_or_raising_to_amount or max(state.bets)
         s_max_bet = state.max_completion_betting_or_raising_to_amount or s_min_bet
@@ -220,6 +247,15 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
     known_street = "PREFLOP"
     print(f"🌍 STREET: PREFLOP")
 
+    # FIX: Initialize hand and game memories for recurrent models in the showcase!
+    hand_memories = {pid: None for pid in player_ids}
+    game_memories = {pid: None for pid in player_ids}
+
+    if IS_RECURRENT:
+        for pid in player_ids:
+            hand_memories[pid] = population[pid].init_hand_memory(batch_size=1)
+            game_memories[pid] = population[pid].init_game_memory(batch_size=1)
+
     while state.status:
         # Securely extract the board using the new flattener
         flat_board = flatten_cards(state.board_cards)
@@ -246,7 +282,16 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
 
         snapshot = extract_state_snapshot(state, actor_idx)
         with torch.no_grad():
-            action_tensor = ai_player.get_action((snapshot, actor_idx))
+            # FIX: Safely route action polling based on recurrence
+            if IS_RECURRENT:
+                action_tensor, new_hand = ai_player.get_action(
+                    (snapshot, actor_idx),
+                    hand_hidden=hand_memories[pid],
+                    game_hidden=game_memories[pid]
+                )
+                hand_memories[pid] = new_hand
+            else:
+                action_tensor = ai_player.get_action((snapshot, actor_idx))
 
         s_min_bet = state.min_completion_betting_or_raising_to_amount or max(state.bets)
         s_max_bet = state.max_completion_betting_or_raising_to_amount or s_min_bet
@@ -274,7 +319,6 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
         elif interpreted_action == Action.RAISE:
             legal_min = state.min_completion_betting_or_raising_to_amount
             legal_max = state.max_completion_betting_or_raising_to_amount
-            # print(legal_min, legal_max)
             if legal_min is not None and legal_max is not None:
                 clamped_bet = max(legal_min, min(bet_sizing, legal_max))
                 state.complete_bet_or_raise_to(clamped_bet)
@@ -295,7 +339,7 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
     print("-" * 50)
 
     # ---------------------------------------------------------
-    # THE FIX: Robutsly extract the final board cards
+    # THE FIX: Robustly extract the final board cards
     # ---------------------------------------------------------
     flat_final_board = flatten_cards(state.board_cards)
     if len(flat_final_board) > 0:
@@ -327,7 +371,8 @@ if __name__ == '__main__':
     target_folder = args.run_folder if args.run_folder else get_latest_run_folder()
 
     device = torch.device("cpu")
-    action_interpreter = ActionInterpreter()
+    # FIX: Initialize ActionInterpreter with explicit beta mode!
+    action_interpreter = ActionInterpreter("beta")
 
     print(f"\n==================================================")
     print(f"🌐 AI POPULATION TOURNAMENT 🌐")

@@ -8,6 +8,7 @@ from pokerkit import NoLimitTexasHoldem, Automation
 from src.action_interpreter import to_exact_fraction, Action
 from src.state_interpreter import extract_state_snapshot
 from src.baseline_model import FastBaselineBot, get_valid_actions_dict
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 CHUNK_SIZE = 100
 
@@ -127,11 +128,20 @@ class Table:
                 # save the hand info
                 hand_rewards = [reward] * len(self.game_states[i])
 
-                self.states.extend(self.game_states[i])
-                self.current_actors.extend(self.game_current_actors[i])
-                self.actions.extend(self.game_actions[i])
-                self.sample_weights.extend(self.game_sample_weights[i])
-                self.rewards.extend(hand_rewards)
+                if IS_RECURRENT:
+                    # Keep sequences intact for RNN
+                    self.states.append(self.game_states[i])
+                    self.current_actors.append(self.game_current_actors[i])
+                    self.actions.append(self.game_actions[i])
+                    self.sample_weights.append(self.game_sample_weights[i])
+                    self.rewards.append(hand_rewards)
+                else:
+                    # Flatten sequences for standard PPO (Original Code)
+                    self.states.extend(self.game_states[i])
+                    self.current_actors.extend(self.game_current_actors[i])
+                    self.actions.extend(self.game_actions[i])
+                    self.sample_weights.extend(self.game_sample_weights[i])
+                    self.rewards.extend(hand_rewards)
 
                 if final_game_stack < self.game_params["min_bet"]:
                     # player is busted out
@@ -304,5 +314,5 @@ def generate_data(save_folder: str, num_games=100_000, num_workers=4, model_mode
 
 
 if __name__ == '__main__':
-    save_folder = "./data/"
-    generate_data(save_folder)
+    save_folder = f"./data/{'rnn' if IS_RECURRENT else 'no_mem'}/"
+    generate_data(save_folder, num_workers=4)
