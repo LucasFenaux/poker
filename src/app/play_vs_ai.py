@@ -2,6 +2,7 @@ import torch
 from pokerkit import NoLimitTexasHoldem, Automation
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import ActionInterpreter, Action
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 class HumanAIPokerManager:
@@ -29,13 +30,17 @@ class HumanAIPokerManager:
         self.start_of_hand_human_stack = 200.0
         self.start_of_hand_ai_stack = 200.0
 
-        # NEW: Cache the dealt cards so PokerKit can't erase them when mucking
+        # Cache the dealt cards so PokerKit can't erase them when mucking
         self.dealt_human_cards = []
         self.dealt_ai_cards = []
 
         self.last_pot = 0.0
         self.hand_count = 0
         self.last_message = "Game Started"
+
+        # RNN Memory Tracking
+        self.hand_memory = None
+        self.game_memory = None
 
     def set_game_params(self, starting_chips, sb, bb, disable_mucking, display_in_bb):
         self.initial_stack = float(starting_chips)
@@ -46,8 +51,14 @@ class HumanAIPokerManager:
         self.always_show_ai_cards = disable_mucking
         self.display_in_bb = display_in_bb
         self.hand_count = 0
+        self.game_memory = None  # Reset session memory entirely on new game config
 
     def start_new_hand(self):
+        # Correctly save the game_memory from the previous hand before resetting hand_memory
+        if IS_RECURRENT and self.hand_memory is not None:
+            self.game_memory = self.ai_player.update_game_memory(self.hand_memory, self.game_memory)
+
+        self.hand_memory = None
         self.hand_count += 1
 
         if self.hand_count % 2 == 1:
@@ -91,7 +102,7 @@ class HumanAIPokerManager:
             player_count=2
         )
 
-        # NEW: Snapshot the dealt cards immediately!
+        # Snapshot the dealt cards immediately!
         if self.state.hole_cards:
             self.dealt_human_cards = [repr(c) for c in self.state.hole_cards[self.human_seat]]
             self.dealt_ai_cards = [repr(c) for c in self.state.hole_cards[self.ai_seat]]
@@ -135,7 +146,6 @@ class HumanAIPokerManager:
             else:
                 flat_board.append(c)
 
-        # Draw from our snapshot so human cards don't disappear if you fold
         human_cards = self.dealt_human_cards
         ai_cards = []
 
@@ -159,7 +169,6 @@ class HumanAIPokerManager:
 
             went_to_showdown = self.state.statuses[self.human_seat] and self.state.statuses[self.ai_seat]
 
-            # Use our snapshot of the AI's cards instead of asking PokerKit
             if self.always_show_ai_cards or went_to_showdown:
                 ai_cards = self.dealt_ai_cards
 
@@ -221,7 +230,15 @@ class HumanAIPokerManager:
             snapshot = extract_state_snapshot(self.state, actor_idx)
 
             with torch.no_grad():
-                action_tensor = self.ai_player.get_action((snapshot, actor_idx))
+                if IS_RECURRENT:
+                    action_tensor, new_hand_hidden = self.ai_player.get_action(
+                        (snapshot, actor_idx),
+                        hand_hidden=self.hand_memory,
+                        game_hidden=self.game_memory
+                    )
+                    self.hand_memory = new_hand_hidden
+                else:
+                    action_tensor = self.ai_player.get_action((snapshot, actor_idx))
 
             s_min_bet = self.state.min_completion_betting_or_raising_to_amount or max(self.state.bets)
             s_max_bet = self.state.max_completion_betting_or_raising_to_amount or s_min_bet

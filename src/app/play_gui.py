@@ -1,14 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import torch
-import os
-import argparse
-import glob
-import random
-
-# --- Local Project Imports ---
-from src.app.play_vs_ai import HumanAIPokerManager
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper
 
 
 def format_cards(card_list):

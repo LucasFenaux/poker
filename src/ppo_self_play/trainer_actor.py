@@ -1,9 +1,9 @@
+import os
 import traceback
 
 import ray
 from ray.util.queue import Queue, Empty
 import torch
-import os
 from torch.utils.tensorboard import SummaryWriter
 
 from src.ppo_self_play.alg import PPO, RNNPPO
@@ -14,7 +14,6 @@ from src.ppo_self_play.global_settings import IS_RECURRENT
 class TrainerActor:
     def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
                  player_save_folder: str, mode: str) -> None:
-        # torch.set_num_threads(8)
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue

@@ -26,31 +26,26 @@ def load_poker_ai(model_path, device):
     """
     print(f"Loading AI Model from {model_path}...")
 
-    # 1. Initialize the raw networks
-    models = PPO.init_networks(device, mode="beta", discrete=False)
-
-    # 2. Wrap them in the Inference Wrapper for gameplay
+    # 1. Initialize the raw networks and wrap them in the Inference Wrapper for gameplay
     if IS_RECURRENT:
+        models = RNNPPO.init_networks(device, mode="beta", discrete=False)
         ai_player = RNNPPOInferenceWrapper(models, discrete=False)
     else:
+        models = PPO.init_networks(device, mode="beta", discrete=False)
         ai_player = PPOInferenceWrapper(models, discrete=False)
 
     # 3. Load the full checkpoint saved by the trainer
-    # Set weights_only=False if your optimizer states contain complex objects that throw warnings
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
 
     # 4. Unpack the weights and optimizer params
-    # Based on trainer_actor.py, the saved tuple is (new_weights, new_optimizer_params)
     if isinstance(checkpoint, tuple) and len(checkpoint) == 2:
         model_weights, optimizer_params = checkpoint
         print("Successfully unpacked model weights from training checkpoint.")
     else:
-        # Fallback just in case you load an older weights-only format
         model_weights = checkpoint
         print("Loaded legacy weights-only format.")
 
     # 5. Apply parameters to the wrapper
-    # ai_player.load_params expects the [network_state_dict, value_state_dict] list
     ai_player.load_params(model_weights)
     ai_player.to(device)
 

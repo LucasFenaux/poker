@@ -1,10 +1,10 @@
+import os
 import pickle
 from collections import deque
 import pokerkit
 import ray
 from typing import Union
 from ray.util.queue import Queue, Empty
-import os
 from torch.utils.tensorboard import SummaryWriter
 from pokerkit import NoLimitTexasHoldem, Automation
 import random
@@ -32,7 +32,6 @@ class TableActor:
 
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
                  model_mode: str, batch_size: int, log_folder: str):
-
         self.table_id = table_id
         self.in_queue = in_queue
         self.out_queue = out_queue

@@ -46,7 +46,7 @@ class LeaderboardGUI:
         self.tree.heading("ID", text="Player ID")
         self.tree.heading("Games", text="Games")
         self.tree.heading("Total", text="All-Time")
-        self.tree.heading("Recent Avg", text="Last 10 Avg")
+        self.tree.heading("Recent Avg", text="Last 100 Avg")
         self.tree.heading("Status", text="Status")
 
         self.tree.column("Rank", width=50)
