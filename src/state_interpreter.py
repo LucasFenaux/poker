@@ -91,7 +91,7 @@ def extract_state_snapshot(state, current_actor) -> StateSnapshot:
     )
 
 
-class StatePreprocessor:
+class HoldemStatePreprocessor:
     """
     Handles all CPU-bound parsing, math, centering, and padding.
     Outputs a clean dictionary of raw numeric features ready for PyTorch.
@@ -207,7 +207,7 @@ class CardEmbedding(nn.Module):
         return torch.cat([r, s], dim=-1).flatten(start_dim=-2)
 
 
-class StateInterpreter(nn.Module):
+class HoldemStateInterpreter(nn.Module):
     """
     Pure PyTorch module. Takes a batched dictionary of preprocessed numeric features,
     embeds the integers, and concatenates them with the floats on the GPU.
@@ -270,3 +270,61 @@ class StateInterpreter(nn.Module):
         input_features = torch.cat(concat_list, dim=-1)
 
         return input_features
+
+
+class KuhnStatePreprocessor:
+    rank_mapping = {"2": 0, "3": 1, "4": 2, "5": 3, "6": 4, "7": 5, "8": 6, "9": 7, "T": 8, "J": 9, "Q": 10, "K": 11, "A": 12, "?": 13}
+    suit_mapping = {"c": 0, "d": 1, "h": 2, "s": 3, "?": 4}
+
+    def __init__(self, max_num_players=2):
+        self.max_num_players = max_num_players
+
+    @classmethod
+    def parse_cards(cls, cards: str):
+        if not cards:
+            return [13], [4]
+        assert len(cards) % 2 == 0
+        ranks = [cls.rank_mapping[cards[i]] for i in range(len(cards)) if i % 2 == 0]
+        suits = [cls.suit_mapping[cards[i]] for i in range(len(cards)) if i % 2 == 1]
+        return ranks, suits
+
+    def process(self, state: Union[pokerkit.State, StateSnapshot], current_actor: int) -> Dict[str, list]:
+        if isinstance(state, StateSnapshot):
+            snapshot = state
+        else:
+            snapshot = extract_state_snapshot(state, current_actor)
+        
+        cards = snapshot.hole_cards
+        p_ranks, p_suits = self.parse_cards(cards)
+        if len(p_ranks) == 0:
+            p_ranks, p_suits = [13], [4]
+        
+        bets = snapshot.bets
+        if not bets:
+            bets = [0.0, 0.0]
+        elif len(bets) < 2:
+            bets = bets + [0.0] * (2 - len(bets))
+            
+        bet = float(bets[current_actor])
+        opp_bet = float(bets[1 - current_actor])
+        
+        pot = float(sum(bets) + sum(snapshot.pots) if snapshot.pots else sum(bets))
+        
+        return {
+            "player_ranks": p_ranks[:1],
+            "player_suits": p_suits[:1],
+            "float_features": [bet, opp_bet, pot, float(current_actor)],
+        }
+
+class KuhnStateInterpreter(nn.Module):
+    def __init__(self, device, rank_dim: int = 16, suit_dim: int = 4):
+        super().__init__()
+        self.device = device
+        self.card_embedding = CardEmbedding(rank_dim, suit_dim)
+        
+    def expected_input_size(self):
+        return (16 + 4) * 1 + 4
+
+    def forward(self, preprocessed_batch: Dict[str, torch.Tensor]):
+        p_emb = self.card_embedding(preprocessed_batch["player_ranks"], preprocessed_batch["player_suits"])
+        return torch.cat([preprocessed_batch["float_features"], p_emb], dim=-1)

@@ -8,7 +8,7 @@ from pokerkit import NoLimitTexasHoldem, Automation
 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
-from src.action_interpreter import ActionInterpreter
+from src.game_registry import get_current_game_config
 from src.ppo_self_play.alg import RNNPPO, RNNPPOInferenceWrapper
 from src.ppo_self_play.global_settings import IS_RECURRENT
 from evaluate import FastBaselineBot, get_latest_run_folder, get_valid_actions_dict
@@ -63,16 +63,24 @@ def simulate_memory_test_games(ai_player, num_matches, hands_per_match, action_i
             starting_chips = random.randint(min_stack, max_stack) * big_blind
             starting_stacks = [starting_chips] * table_size
 
-            state = NoLimitTexasHoldem.create_state(
-                (
-                    Automation.ANTE_POSTING, Automation.BET_COLLECTION, Automation.BLIND_OR_STRADDLE_POSTING,
-                    Automation.CARD_BURNING, Automation.HOLE_DEALING, Automation.BOARD_DEALING,
-                    Automation.HOLE_CARDS_SHOWING_OR_MUCKING, Automation.HAND_KILLING,
-                    Automation.CHIPS_PUSHING, Automation.CHIPS_PULLING,
-                ),
-                ante_trimming_status=True, raw_antes=0, raw_blinds_or_straddles=(1, big_blind),
-                min_bet=big_blind, raw_starting_stacks=starting_stacks, player_count=table_size
+            game_config = get_current_game_config()
+            table_param_generator = game_config['table_param_generator']
+            PokerkitGame = game_config['pokerkit_game']
+            pokerkit_automations = game_config['pokerkit_automations']
+            
+            table_params = table_param_generator(
+                table_size=table_size,
+                small_blind=1,
+                big_blind=big_blind,
+                bb_starting_stacks=random.randint(min_stack, max_stack)
             )
+
+            state = PokerkitGame.create_state(
+                pokerkit_automations,
+                **table_params
+            )
+            
+            initial_stacks = list(state.stacks)
 
             # --- 2. INITIALIZE HAND MEMORY (Once per hand) ---
             if not amnesia_mode:
@@ -144,7 +152,7 @@ def simulate_memory_test_games(ai_player, num_matches, hands_per_match, action_i
                     else:
                         state.complete_bet_or_raise_to(amt)
 
-            profit_bb = (float(state.stacks[ai_seat]) - float(starting_stacks[ai_seat])) / float(big_blind)
+            profit_bb = (float(state.stacks[ai_seat]) - float(initial_stacks[ai_seat])) / float(big_blind)
             ai_winnings_per_hand_bb.append(profit_bb)
 
             # --- 3. UPDATE GAME MEMORY (At the end of the hand) ---
@@ -162,6 +170,7 @@ def simulate_memory_test_games(ai_player, num_matches, hands_per_match, action_i
 
 def evaluate_memory_impact(num_matches, hands_per_match, model_path):
     device = torch.device("cpu")
+    ActionInterpreter = get_current_game_config()['action_interpreter']
     action_interpreter = ActionInterpreter("beta")
     baseline_bot = FastBaselineBot(player_index=0)
 

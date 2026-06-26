@@ -9,9 +9,12 @@ from pokerkit import NoLimitTexasHoldem, Automation, State, calculate_equities, 
 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
-from src.action_interpreter import ActionInterpreter, Action
+from src.action_interpreter import Action
 from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
 from src.ppo_self_play.global_settings import IS_RECURRENT
+
+game_config = get_current_game_config()
+ActionInterpreter = game_config['action_interpreter']
 
 
 # --- 1. Baseline Bot Logic ---
@@ -87,9 +90,17 @@ class FastBaselineBot:
 
 # --- 2. Evaluation Engine Helpers ---
 def get_latest_run_folder(base_path="results"):
-    runs = glob.glob(os.path.join(base_path, "run_*"))
+    from src.ppo_self_play.global_settings import GAME_TYPE
+    runs = glob.glob(os.path.join(base_path, f"run_{GAME_TYPE}_*"))
+    
+    if not runs and GAME_TYPE == "HOLDEM":
+        all_runs = glob.glob(os.path.join(base_path, "run_*"))
+        from src.ppo_self_play.global_settings import GAME_TYPES
+        other_games = [gt for gt in GAME_TYPES if gt != "HOLDEM"]
+        runs = [r for r in all_runs if not any(os.path.basename(r).startswith(f"run_{gt}_") for gt in other_games)]
+
     if not runs:
-        raise ValueError(f"No run folders found in {base_path}")
+        raise ValueError(f"No run folders found in {base_path} for GAME_TYPE={GAME_TYPE}")
     return max(runs, key=os.path.getmtime)
 
 
@@ -135,32 +146,25 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
         small_blind = 1
         big_blind = random.randint(min_bb_ratio, max_bb_ratio) * small_blind
         bb_starting_stacks = random.randint(min_stack, max_stack)
-        starting_chips = bb_starting_stacks * big_blind
-
-        blinds = (small_blind, big_blind)
-        min_bet = big_blind
-        starting_stacks = [starting_chips] * current_table_size
-
-        state = NoLimitTexasHoldem.create_state(
-            (
-                Automation.ANTE_POSTING,
-                Automation.BET_COLLECTION,
-                Automation.BLIND_OR_STRADDLE_POSTING,
-                Automation.CARD_BURNING,
-                Automation.HOLE_DEALING,
-                Automation.BOARD_DEALING,
-                Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
-                Automation.HAND_KILLING,
-                Automation.CHIPS_PUSHING,
-                Automation.CHIPS_PULLING,
-            ),
-            ante_trimming_status=True,
-            raw_antes=0,
-            raw_blinds_or_straddles=blinds,
-            min_bet=min_bet,
-            raw_starting_stacks=starting_stacks,
-            player_count=current_table_size
+        
+        game_config = get_current_game_config()
+        table_param_generator = game_config['table_param_generator']
+        PokerkitGame = game_config['pokerkit_game']
+        pokerkit_automations = game_config['pokerkit_automations']
+        
+        table_params = table_param_generator(
+            table_size=current_table_size,
+            small_blind=small_blind,
+            big_blind=big_blind,
+            bb_starting_stacks=bb_starting_stacks
         )
+
+        state = PokerkitGame.create_state(
+            pokerkit_automations,
+            **table_params
+        )
+        
+        initial_stacks = list(state.stacks)
 
         if IS_RECURRENT:
             hand_hidden = ai_player.init_hand_memory(batch_size=1)
@@ -227,7 +231,7 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
                     state.complete_bet_or_raise_to(amt)
 
         # Record AI Profit safely using float() to avoid Fractional object errors
-        ai_profit_chips = float(state.stacks[ai_seat]) - float(starting_stacks[ai_seat])
+        ai_profit_chips = float(state.stacks[ai_seat]) - float(initial_stacks[ai_seat])
         ai_profit_bb = ai_profit_chips / float(big_blind)
         ai_winnings_per_hand_bb.append(ai_profit_bb)
 
@@ -237,6 +241,7 @@ def simulate_eval_games(ai_player, num_games, max_table_size, action_interpreter
 def evaluate_agent(num_games, run_folder, player_id, max_table_size, explicit_model_path=None):
     device = torch.device("cpu")
     # FIX: Initialize ActionInterpreter with explicit beta mode!
+    ActionInterpreter = get_current_game_config()['action_interpreter']
     action_interpreter = ActionInterpreter("beta")
     baseline_bot = FastBaselineBot(player_index=0)
 

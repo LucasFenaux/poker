@@ -9,7 +9,8 @@ from torch.utils.tensorboard import SummaryWriter
 from pokerkit import NoLimitTexasHoldem, Automation
 import random
 import torch
-from src.action_interpreter import ActionInterpreter, Action
+from src.action_interpreter import Action
+from src.game_registry import get_current_game_config
 from src.state_interpreter import extract_state_snapshot
 from src.ppo_self_play.alg import PPOInferenceWrapper, PPO, RNNPPOInferenceWrapper, RNNPPO
 from src.player_ai import PlayerAI, RNNPlayerAI
@@ -18,8 +19,7 @@ from src.ppo_self_play.global_settings import IS_RECURRENT
 import traceback
 
 
-@ray.remote(num_cpus=0)
-class TableActor:
+class BaseTableActor:
     default_params = {
         "ante_trimming_status": True,
         "raw_antes": 0,
@@ -38,7 +38,8 @@ class TableActor:
         self.device = device
         self.discrete = discrete
         self.max_table_size = max_table_size
-        self.action_interpreter: ActionInterpreter = ActionInterpreter(model_mode)
+        ActionInterpreter = get_current_game_config()["action_interpreter"]
+        self.action_interpreter = ActionInterpreter(model_mode)
         self.model_mode = model_mode
         self.num_games_played = 0
         # number of games to play
@@ -262,13 +263,23 @@ class TableActor:
                 # we reached the last street level, we can compute the rewards
                 final_game_stacks = state.stacks[:]
                 expected_rewards = {}  # Store scalar expected values safely
-                for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
-                                                                                self.game_starting_stacks)):
-                    reward = (final_game_stack - game_starting_stack) / (self.game_params["raw_blinds_or_straddles"][-1])
+                
+                true_starting_stacks = getattr(state, "starting_stacks", None)
+                if true_starting_stacks is None:
+                    true_starting_stacks = self.game_params.get("raw_starting_stacks", self.game_starting_stacks)
+                    
+                for i, (final_game_stack, initial_stack) in enumerate(zip(final_game_stacks,
+                                                                                true_starting_stacks)):
+                    chip_delta = final_game_stack - initial_stack
+                    reward = chip_delta / (self.game_params.get("raw_blinds_or_straddles", [1])[-1])
                     player_id = self.game_player_ids[i]
                     hand_rewards = [reward] * len(snapshots[player_id])
                     rewards[player_id] = hand_rewards
                     expected_rewards[player_id] = reward  # Safe scalar value
+                    
+                # if self.num_games_played == 0 and len(snapshots[self.game_player_ids[0]]) < 2:
+                    # print(f"DEBUG: true_starting_stacks={true_starting_stacks}, final_game_stacks={final_game_stacks}, expected_rewards={expected_rewards}", flush=True)
+
                 return snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards
 
         current_level_counts = {player_id: len(snapshots[player_id]) for player_id in self.game_player_ids}
@@ -457,23 +468,23 @@ class TableActor:
             # compute rewards
             final_game_stacks = state.stacks[:]
             busted_out = []
-            for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
-                                                                            self.game_starting_stacks)):
-                reward = (final_game_stack - game_starting_stack)/(self.game_params["raw_blinds_or_straddles"][-1])
+            
+            true_starting_stacks = getattr(state, "starting_stacks", None)
+            if true_starting_stacks is None:
+                true_starting_stacks = self.game_params.get("raw_starting_stacks", self.game_starting_stacks)
+
+            new_game_stacks = []
+            for i, (final_game_stack, initial_stack) in enumerate(zip(final_game_stacks,
+                                                                            true_starting_stacks)):
+                chip_delta = final_game_stack - initial_stack
+                reward = chip_delta / (self.game_params.get("raw_blinds_or_straddles", [1])[-1])
+
+                new_game_stack = self.game_starting_stacks[i] + chip_delta
+                new_game_stacks.append(new_game_stack)
 
                 # save the hand info
                 player_id = self.game_player_ids[i]
                 hand_rewards = [reward] * len(self.current_hand[player_id]["states"])
-                # if IS_RECURRENT:
-                #     # we want to keep the hand structure so we append rather than extend
-                #     self.hand_info[player_id]["states"].append(self.current_hand[player_id]["states"])
-                #     self.hand_info[player_id]["current_actors"].append(self.current_hand[player_id]["current_actors"])
-                #     self.hand_info[player_id]["actions"].append(self.current_hand[player_id]["actions"])
-                #     self.hand_info[player_id]["rewards"].append(hand_rewards)
-                #     self.hand_info[player_id]["sample_weights"].append(self.current_hand[player_id]["sample_weights"])
-                #     self.hand_info[player_id]["hand_memories"].append(self.current_hand[player_id]["hand_memories"])
-                #     self.hand_info[player_id]["game_memories"].append(self.current_hand[player_id]["game_memories"])
-                # else:
                 self.hand_info[player_id]["states"].extend(self.current_hand[player_id]["states"])
                 self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
                 self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
@@ -484,7 +495,7 @@ class TableActor:
 
                 self.hand_info[player_id]["new_hands"].extend(self.current_hand[player_id]["new_hands"])
 
-                if final_game_stack < self.game_params["min_bet"]:
+                if new_game_stack < self.game_params.get("min_bet", 1):
                     # player is busted out
                     # update game view to remove the busted out player
                     busted_out.append(i)
@@ -495,9 +506,9 @@ class TableActor:
             for i in busted_out:
                 player_id = self.game_player_ids[i]
                 j = self.player_ids.index(player_id)
-                self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
+                self.player_winnings[player_id] += new_game_stacks[i] - self.starting_stacks[j]  # we look at the game starting stacks, not the hand starting stacks
 
-                final_game_stacks.pop(i)
+                new_game_stacks.pop(i)
                 self.game_players.pop(i)
                 self.game_starting_stacks.pop(i)
                 self.game_player_ids.pop(i)
@@ -505,7 +516,7 @@ class TableActor:
                 self.game_params["player_count"] = len(self.game_player_ids)
 
             # update the player game stacks
-            self.game_starting_stacks = final_game_stacks
+            self.game_starting_stacks = new_game_stacks
 
             if self.game_params["player_count"] < 2:
                 return True
@@ -527,11 +538,11 @@ class TableActor:
         with torch.no_grad():
             if IS_RECURRENT:
                 player_action_tensor, new_hand_hidden = player.get_action((snapshot, current_actor), hand_hidden, game_hidden)
-                player_action = player_action_tensor.detach().cpu().squeeze(0)
+                player_action = player_action_tensor.detach().cpu()
                 return player_action, new_hand_hidden
             else:
                 player_action_tensor = player.get_action((snapshot, current_actor))
-                player_action = player_action_tensor.detach().cpu().squeeze(0)
+                player_action = player_action_tensor.detach().cpu()
                 return player_action
 
     def play_game(self):
@@ -687,6 +698,207 @@ class TableActor:
                             "type": "player",
                             "table_id": self.table_id,
                             "player_id": player_id,
-                            "other_players": None   # we have safety logic that prevents a weight with itself
+                            "other_players": None
                         })
                     self.out_queue.put_nowait_batch(batch)
+
+@ray.remote(num_cpus=0)
+class HoldemTableActor(BaseTableActor):
+    pass
+
+@ray.remote(num_cpus=0)
+class KuhnTableActor(BaseTableActor):
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
+                 model_mode: str, batch_size: int, log_folder: str):
+        super().__init__(table_id, device, in_queue, out_queue, max_table_size, discrete, model_mode, batch_size, log_folder)
+        self.linear_replay = 1  # less replay since we quickly hit the batch limit
+
+    def _play_tree_round(self):
+        from pokerkit import KuhnPoker
+        try:
+            state = KuhnPoker.create_state(
+                (
+                    Automation.ANTE_POSTING,
+                    Automation.BET_COLLECTION,
+                    Automation.BLIND_OR_STRADDLE_POSTING,
+                    Automation.CARD_BURNING,
+                    Automation.HOLE_DEALING,
+                    Automation.BOARD_DEALING,
+                    Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
+                    Automation.HAND_KILLING,
+                    Automation.CHIPS_PUSHING,
+                    Automation.CHIPS_PULLING,
+                )
+            )
+            with self.timer.time("TreeRound_Play_Level_Recursive"):
+                snapshots, current_actors, player_actions, sample_weights, rewards, expected_rewards = self._play_tree_level(state, 0)
+
+            with self.timer.time("TreeRound_Process_Bustouts"):
+                busted_out = []
+                final_game_stacks = []
+                for i, player_id in enumerate(self.game_player_ids):
+                    reward_in_bbs = expected_rewards[player_id]
+                    chip_delta = reward_in_bbs * self.game_params.get("raw_blinds_or_straddles", [1])[-1]
+                    final_game_stack = self.game_starting_stacks[i] + chip_delta
+                    final_game_stacks.append(final_game_stack)
+
+                    self.hand_info[player_id]["states"].extend(snapshots[player_id])
+                    self.hand_info[player_id]["current_actors"].extend(current_actors[player_id])
+                    self.hand_info[player_id]["actions"].extend(player_actions[player_id])
+                    self.hand_info[player_id]["rewards"].extend(rewards[player_id])
+                    self.hand_info[player_id]["sample_weights"].extend(sample_weights[player_id])
+
+                    if final_game_stack < self.game_params.get("min_bet", 1):
+                        busted_out.append(i)
+
+                busted_out.sort(reverse=True)
+
+                for i in busted_out:
+                    player_id = self.game_player_ids[i]
+                    j = self.player_ids.index(player_id)
+                    self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j]
+
+                    final_game_stacks.pop(i)
+                    self.game_players.pop(i)
+                    self.game_starting_stacks.pop(i)
+                    self.game_player_ids.pop(i)
+
+                    self.game_params["player_count"] = len(self.game_player_ids)
+
+                button_busted = (0 in busted_out)
+                self.game_starting_stacks = final_game_stacks
+
+                if self.game_params["player_count"] < 2:
+                    return True
+
+                if not button_busted:
+                    self.game_players.append(self.game_players.pop(0))
+                    self.game_player_ids.append(self.game_player_ids.pop(0))
+                    self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
+
+            return False
+        except Exception as e:
+            print(f"Exception: {e} encountered in Table {self.table_id} in tree round fn")
+            if self.table_id == 0:
+                traceback.print_exc()
+            return True
+
+    def _play_linear_round(self):
+        from pokerkit import KuhnPoker
+        try:
+            state = KuhnPoker.create_state(
+                (
+                    Automation.ANTE_POSTING,
+                    Automation.BET_COLLECTION,
+                    Automation.BLIND_OR_STRADDLE_POSTING,
+                    Automation.CARD_BURNING,
+                    Automation.HOLE_DEALING,
+                    Automation.BOARD_DEALING,
+                    Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
+                    Automation.HAND_KILLING,
+                    Automation.CHIPS_PUSHING,
+                    Automation.CHIPS_PULLING,
+                )
+            )
+
+            while state.status:
+                current_actor = state.actor_index
+                player = self.game_players[current_actor]
+                player_id = self.game_player_ids[current_actor]
+                snapshot = extract_state_snapshot(state, current_actor)
+
+                if IS_RECURRENT:
+                    hand_memory = self.hand_memories[player_id]
+                    game_memory = self.game_memories[player_id]
+                else:
+                    hand_memory = None
+                    game_memory = None
+
+                try:
+                    player_action, new_hand_memory = self._get_action(player, snapshot, current_actor, hand_hidden=hand_memory,
+                                                     game_hidden=game_memory)
+                except Exception as e:
+                    print("linear_round", state)
+                    if self.table_id == 0:
+                        traceback.print_exc()
+                    raise e
+
+                is_new_hand = True if len(self.current_hand[player_id]["states"]) == 0 else False
+                self.current_hand[player_id]["new_hands"].append(is_new_hand)
+
+                self.current_hand[player_id]["states"].append(snapshot)
+                self.current_hand[player_id]["current_actors"].append(current_actor)
+                self.current_hand[player_id]["actions"].append(player_action)
+                self.current_hand[player_id]["sample_weights"].append(1.)
+                self.current_hand[player_id]["hand_memories"].append(hand_memory)
+
+                self._take_action(state, player_action)
+                self.hand_memories[player_id] = new_hand_memory
+            if IS_RECURRENT:
+                for player, player_id in zip(self.game_players, self.game_player_ids):
+                    game_memory = self.game_memories[player_id]
+                    last_hand_memory = self.hand_memories[player_id]
+                    player: RNNPPOInferenceWrapper
+                    new_game_memory = player.update_game_memory(last_hand_memory, game_memory)
+                    self.current_hand[player_id]["game_memories"] = game_memory  
+                    self.game_memories[player_id] = new_game_memory
+
+            true_starting_stacks = getattr(state, "starting_stacks", None)
+            if true_starting_stacks is None:
+                true_starting_stacks = [2] * len(self.game_player_ids)
+                
+            state_final_stacks = state.stacks[:]
+            final_game_stacks = []
+            busted_out = []
+            
+            for i, (state_final_stack, initial_stack, game_starting_stack) in enumerate(zip(state_final_stacks, true_starting_stacks, self.game_starting_stacks)):
+                chip_delta = state_final_stack - initial_stack
+                reward = chip_delta  # No blinds in Kuhn
+                new_game_stack = game_starting_stack + chip_delta
+                final_game_stacks.append(new_game_stack)
+
+                player_id = self.game_player_ids[i]
+                hand_rewards = [reward] * len(self.current_hand[player_id]["states"])
+                self.hand_info[player_id]["states"].extend(self.current_hand[player_id]["states"])
+                self.hand_info[player_id]["current_actors"].extend(self.current_hand[player_id]["current_actors"])
+                self.hand_info[player_id]["actions"].extend(self.current_hand[player_id]["actions"])
+                self.hand_info[player_id]["rewards"].extend(hand_rewards)
+                self.hand_info[player_id]["sample_weights"].extend(self.current_hand[player_id]["sample_weights"])
+                self.hand_info[player_id]["hand_memories"].extend(self.current_hand[player_id]["hand_memories"])
+                self.hand_info[player_id]["game_memories"].extend([self.current_hand[player_id]["game_memories"],])
+
+                self.hand_info[player_id]["new_hands"].extend(self.current_hand[player_id]["new_hands"])
+
+                if new_game_stack < self.game_params.get("min_bet", 1):
+                    busted_out.append(i)
+
+            busted_out.sort(reverse=True)
+
+            for i in busted_out:
+                player_id = self.game_player_ids[i]
+                j = self.player_ids.index(player_id)
+                self.player_winnings[player_id] += final_game_stacks[i] - self.starting_stacks[j] 
+
+                final_game_stacks.pop(i)
+                self.game_players.pop(i)
+                self.game_starting_stacks.pop(i)
+                self.game_player_ids.pop(i)
+
+                self.game_params["player_count"] = len(self.game_player_ids)
+
+            self.game_starting_stacks = final_game_stacks
+
+            if self.game_params["player_count"] < 2:
+                return True
+
+            self.game_players.append(self.game_players.pop(0))
+            self.game_player_ids.append(self.game_player_ids.pop(0))
+            self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
+
+            return False
+
+        except Exception as e:
+            print(f"Exception: {e} encountered in Table {self.table_id} in linear round fn")
+            if self.table_id == 0:
+                traceback.print_exc()
+            return True

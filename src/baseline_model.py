@@ -25,6 +25,22 @@ class FastBaselineBot:
         self.player_index = new_index
 
     def get_action(self, state: State, valid_actions: dict) -> tuple[str, float]:
+        from src.ppo_self_play.global_settings import GAME_TYPE
+        
+        # If it's a non-Holdem game like Kuhn, use a simple random baseline for now 
+        # (since Holdem equity calculations will crash on Kuhn cards)
+        if GAME_TYPE == "KUHN":
+            action_keys = list(valid_actions.keys())
+            chosen_action = random.choice(action_keys)
+            
+            if chosen_action == "complete_bet_or_raise_to":
+                min_r, max_r = valid_actions[chosen_action]
+                return Action.RAISE, float(min_r)  # Just min raise for simplicity
+            elif chosen_action == "check_or_call":
+                return Action.CHECK_OR_CALL, float(valid_actions[chosen_action])
+            else:
+                return Action.CHECK_OR_FOLD, 0.0
+
         active_opponents = sum(1 for i, active in enumerate(state.statuses) if i != self.player_index and active)
 
         # 1. Calculate Equity (Safeguard against 0 opponents just in case)

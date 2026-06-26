@@ -15,9 +15,9 @@ RUN apt-get update && apt-get install -y \
 # 🚀 The official way to install uv in Docker
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy your project definition files
+# Copy your project definition files and .rayignore
 # The asterisk allows it to gracefully copy uv.lock if you have one, or skip it if you don't
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock* .rayignore* ./
 
 # Sync the dependencies (this creates a .venv inside the container)
 # We use --no-install-project to just fetch the dependencies first for Docker caching

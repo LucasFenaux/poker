@@ -38,10 +38,10 @@ def to_exact_fraction(amount: float) -> Fraction:
     return Fraction(str(amount))
 
 
-class ActionInterpreter(nn.Module):
+class HoldemActionInterpreter(nn.Module):
 
     def __init__(self, mode="beta"):
-        super(ActionInterpreter, self).__init__()
+        super(HoldemActionInterpreter, self).__init__()
         if mode == "beta":
             self.squashing_fn = nn.Identity()
         elif mode == "normal":
@@ -85,6 +85,36 @@ class ActionInterpreter(nn.Module):
             action = [Action.decide_action(x.item()) for x in action]
             bet_sizing = self.squashing_fn(x[:, 1])
             bet_sizing = [bet_size_scaling(x.item()) for x in bet_sizing]
+
+        return action, bet_sizing
+
+
+class KuhnActionInterpreter(nn.Module):
+    def __init__(self, mode="beta"):
+        super(KuhnActionInterpreter, self).__init__()
+        if mode == "beta":
+            self.squashing_fn = nn.Identity()
+        elif mode == "normal":
+            self.squashing_fn = nn.Sigmoid()
+
+    def forward(self, x, min_bet, max_bet):
+        from src.ppo_self_play.global_settings import GAME_TYPE
+        expected_size = 1 if GAME_TYPE == "KUHN" else 2
+        
+        if x.dim() == 0:
+            x = x.unsqueeze(0)
+            
+        assert x.shape[-1] == expected_size
+        assert len(x.shape) <= 2
+        
+        if len(x.shape) == 1:
+            val = self.squashing_fn(x[0]).item()
+            action = Action.CHECK_OR_FOLD if val < 0.5 else Action.RAISE
+            bet_sizing = to_exact_fraction(1.0)
+        else:
+            vals = self.squashing_fn(x[:, 0])
+            action = [Action.CHECK_OR_FOLD if v.item() < 0.5 else Action.RAISE for v in vals]
+            bet_sizing = [to_exact_fraction(1.0) for _ in vals]
 
         return action, bet_sizing
 

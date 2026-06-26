@@ -1,8 +1,9 @@
 import torch
 from pokerkit import NoLimitTexasHoldem, Automation
 from src.state_interpreter import extract_state_snapshot
-from src.action_interpreter import ActionInterpreter, Action
+from src.action_interpreter import Action
 from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.game_registry import get_current_game_config
 
 
 class HumanAIPokerManager:
@@ -14,6 +15,7 @@ class HumanAIPokerManager:
         self.ai_player = ai_player_model
         self.human_seat = 0
         self.ai_seat = 1
+        ActionInterpreter = get_current_game_config()['action_interpreter']
         self.action_interpreter = ActionInterpreter()
         self.state = None
 
@@ -41,6 +43,7 @@ class HumanAIPokerManager:
         # RNN Memory Tracking
         self.hand_memory = None
         self.game_memory = None
+        self.initial_hand_stacks = [0.0, 0.0]
 
     def set_game_params(self, starting_chips, sb, bb, disable_mucking, display_in_bb):
         self.initial_stack = float(starting_chips)
@@ -54,6 +57,13 @@ class HumanAIPokerManager:
         self.game_memory = None  # Reset session memory entirely on new game config
 
     def start_new_hand(self):
+        # Update persistent bankrolls with profit from the previous hand
+        if self.state is not None and not self.state.status:
+            human_profit = float(self.state.stacks[self.human_seat]) - self.initial_hand_stacks[self.human_seat]
+            ai_profit = float(self.state.stacks[self.ai_seat]) - self.initial_hand_stacks[self.ai_seat]
+            self.human_stack += human_profit
+            self.ai_stack += ai_profit
+
         # Correctly save the game_memory from the previous hand before resetting hand_memory
         if IS_RECURRENT and self.hand_memory is not None:
             self.game_memory = self.ai_player.update_game_memory(self.hand_memory, self.game_memory)
@@ -81,26 +91,31 @@ class HumanAIPokerManager:
         stacks[self.human_seat] = self.human_stack
         stacks[self.ai_seat] = self.ai_stack
 
-        self.state = NoLimitTexasHoldem.create_state(
-            (
-                Automation.ANTE_POSTING,
-                Automation.BET_COLLECTION,
-                Automation.BLIND_OR_STRADDLE_POSTING,
-                Automation.CARD_BURNING,
-                Automation.HOLE_DEALING,
-                Automation.BOARD_DEALING,
-                Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
-                Automation.HAND_KILLING,
-                Automation.CHIPS_PUSHING,
-                Automation.CHIPS_PULLING,
-            ),
-            ante_trimming_status=True,
-            raw_antes=0,
-            raw_blinds_or_straddles=(self.sb_amount, self.bb_amount),
-            min_bet=self.bb_amount,
-            raw_starting_stacks=stacks,
-            player_count=2
+        game_config = get_current_game_config()
+        table_param_generator = game_config['table_param_generator']
+        PokerkitGame = game_config['pokerkit_game']
+        pokerkit_automations = game_config['pokerkit_automations']
+        
+        table_params = table_param_generator(
+            table_size=2,
+            small_blind=self.sb_amount,
+            big_blind=self.bb_amount,
+            bb_starting_stacks=stacks[0] / self.bb_amount  # Since stacks is a list
         )
+        
+        # We need to manually override raw_starting_stacks to the exact stack list for Heads Up
+        if "raw_starting_stacks" in table_params:
+            table_params["raw_starting_stacks"] = stacks
+
+        from src.ppo_self_play.global_settings import GAME_TYPE
+        if GAME_TYPE == "KUHN":
+            self.state = PokerkitGame.create_state(pokerkit_automations)
+        else:
+            self.state = PokerkitGame.create_state(
+                pokerkit_automations,
+                **table_params
+            )
+        self.initial_hand_stacks = [float(s) for s in self.state.stacks]
 
         # Snapshot the dealt cards immediately!
         if self.state.hole_cards:
@@ -153,12 +168,15 @@ class HumanAIPokerManager:
         winner_message = ""
         current_pot = float(sum(p.amount for p in self.state.pots) + sum(self.state.bets))
 
-        if is_over:
-            self.human_stack = float(self.state.stacks[self.human_seat])
-            self.ai_stack = float(self.state.stacks[self.ai_seat])
+        display_human_stack = self.start_of_hand_human_stack
+        display_ai_stack = self.start_of_hand_ai_stack
 
-            human_diff = self.human_stack - self.start_of_hand_human_stack
-            ai_diff = self.ai_stack - self.start_of_hand_ai_stack
+        if is_over:
+            human_diff = float(self.state.stacks[self.human_seat]) - self.initial_hand_stacks[self.human_seat]
+            ai_diff = float(self.state.stacks[self.ai_seat]) - self.initial_hand_stacks[self.ai_seat]
+
+            display_human_stack = self.start_of_hand_human_stack + human_diff
+            display_ai_stack = self.start_of_hand_ai_stack + ai_diff
 
             if human_diff > 0.01:
                 winner_message = f"🏆 You won {self._fmt(human_diff)}!"
@@ -187,8 +205,8 @@ class HumanAIPokerManager:
             "board": [repr(c) for c in flat_board],
             "human_cards": human_cards,
             "ai_cards": ai_cards,
-            "human_stack": float(self.state.stacks[self.human_seat]),
-            "ai_stack": float(self.state.stacks[self.ai_seat]),
+            "human_stack": display_human_stack,
+            "ai_stack": display_ai_stack,
             "human_street_bet": h_bet,
             "ai_street_bet": a_bet,
             "pot": self.last_pot if is_over else current_pot,

@@ -6,7 +6,9 @@ from torch.distributions.beta import Beta
 import torch.nn.functional as F
 import pokerkit
 from src.ppo_self_play.global_settings import IS_RECURRENT
-from src.state_interpreter import StateInterpreter, StateSnapshot, StatePreprocessor
+from src.state_interpreter import StateSnapshot
+from src.game_registry import get_current_game_config
+
 
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
@@ -14,6 +16,7 @@ LOG_STD_MAX = 2.0
 
 def preprocess_raw_states(states_list, actors_list, device):
     """Helper function to intercept raw states and batch them into a tensor dict."""
+    StatePreprocessor = get_current_game_config()['state_preprocessor']
     preprocessor = StatePreprocessor()
     batch_dict = {}
     for s, a in zip(states_list, actors_list):
@@ -33,7 +36,7 @@ def preprocess_raw_states(states_list, actors_list, device):
 
 
 class PokerModel(nn.Module):
-    def __init__(self, interpreter: StateInterpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str):
         super(PokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
@@ -50,15 +53,16 @@ class PokerModel(nn.Module):
         self.std_net = None
         self.alpha_net = None
         self.beta_net = None
+        action_size = get_current_game_config()['action_size']
         if self.mode == "normal":
-            self.mu_net = nn.Linear(64, 2)
+            self.mu_net = nn.Linear(64, action_size)
             if not deterministic:
-                self.std_net = nn.Linear(64, 2)
+                self.std_net = nn.Linear(64, action_size)
         elif self.mode == "beta":
-            self.alpha_net = nn.Linear(64, 2)
+            self.alpha_net = nn.Linear(64, action_size)
             nn.init.constant_(self.alpha_net.bias, 1.0)
             if not self.deterministic:
-                self.beta_net = nn.Linear(64, 2)
+                self.beta_net = nn.Linear(64, action_size)
                 nn.init.constant_(self.beta_net.bias, 1.0)
         else:
             raise NotImplementedError(self.mode)
@@ -121,7 +125,7 @@ class PokerModel(nn.Module):
 
 
 class ValueModel(nn.Module):
-    def __init__(self, interpreter: StateInterpreter):
+    def __init__(self, interpreter):
         super(ValueModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
@@ -157,7 +161,7 @@ class ValueModel(nn.Module):
 
 
 class HierarchicalPokerModel(nn.Module):
-    def __init__(self, interpreter: StateInterpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str):
         super(HierarchicalPokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
@@ -182,15 +186,16 @@ class HierarchicalPokerModel(nn.Module):
         self.std_net = None
         self.alpha_net = None
         self.beta_net = None
+        action_size = get_current_game_config()['action_size']
         if self.mode == "normal":
-            self.mu_net = nn.Linear(64, 2)
+            self.mu_net = nn.Linear(64, action_size)
             if not deterministic:
-                self.std_net = nn.Linear(64, 2)
+                self.std_net = nn.Linear(64, action_size)
         elif self.mode == "beta":
-            self.alpha_net = nn.Linear(64, 2)
+            self.alpha_net = nn.Linear(64, action_size)
             nn.init.constant_(self.alpha_net.bias, 1.0)
             if not self.deterministic:
-                self.beta_net = nn.Linear(64, 2)
+                self.beta_net = nn.Linear(64, action_size)
                 nn.init.constant_(self.beta_net.bias, 1.0)
         else:
             raise NotImplementedError(self.mode)
@@ -255,7 +260,7 @@ class HierarchicalPokerModel(nn.Module):
 
 
 class HierarchicalValueModel(nn.Module):
-    def __init__(self, interpreter: StateInterpreter):
+    def __init__(self, interpreter):
         super(HierarchicalValueModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
@@ -308,6 +313,7 @@ class HierarchicalValueModel(nn.Module):
 
 
 def get_value_model(device: torch.device) -> Union[ValueModel, HierarchicalValueModel]:
+    StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
         return HierarchicalValueModel(interpreter).to(device)
@@ -316,6 +322,7 @@ def get_value_model(device: torch.device) -> Union[ValueModel, HierarchicalValue
 
 
 def load_model(player_id, device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+    StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
         model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)
@@ -325,6 +332,7 @@ def load_model(player_id, device, deterministic=False, mode="beta") -> Union[Pok
 
 
 def load_dummy_model(device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+    StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
         model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)

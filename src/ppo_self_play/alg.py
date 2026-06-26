@@ -9,7 +9,7 @@ import pokerkit
 from torch.nn.utils.rnn import pad_sequence
 from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
-from src.state_interpreter import StatePreprocessor, safe_log, safe_lin_sqrt
+from src.state_interpreter import safe_log, safe_lin_sqrt
 from src.models import HierarchicalPokerModel
 from torch.distributions.beta import Beta
 
@@ -125,6 +125,8 @@ class PPO(OnPolicyAlgorithm):
 
     def preprocess_batch(self, states_list, actors_list):
         """Converts raw Python states/actors into a batched dictionary of PyTorch tensors."""
+        from src.game_registry import get_current_game_config
+        StatePreprocessor = get_current_game_config()['state_preprocessor']
         preprocessor = StatePreprocessor()
         batch_dict = {}
 
@@ -193,7 +195,10 @@ class PPO(OnPolicyAlgorithm):
             if not self.discrete:
                 logp_all = dist_old.log_prob(safe_actions)
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                if logp_all.shape[-1] > 1:
+                    logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                else:
+                    logp_old = logp_all[:, 0]
             else:
                 logp_old = dist_old.log_prob(safe_actions)
 
@@ -254,10 +259,13 @@ class PPO(OnPolicyAlgorithm):
                 if not self.discrete:
                     logp_all = dist.log_prob(mini_batch_safe_actions)
                     is_raise = (mini_batch_safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                    logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-
                     entropy_all = dist.entropy()
-                    entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+                    if logp_all.shape[-1] > 1:
+                        logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                        entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+                    else:
+                        logp = logp_all[:, 0]
+                        entropy = entropy_all[:, 0]
                 else:
                     logp = dist.log_prob(mini_batch_safe_actions)
                     entropy = dist.entropy()
@@ -308,8 +316,11 @@ class PPO(OnPolicyAlgorithm):
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
             samples = dist.sample((1000,))
-            action_hist = samples[:, :, 0]
-            betting_size = samples[:, :, 1]
+            action_hist = samples[..., 0]
+            if samples.shape[-1] > 1:
+                betting_size = samples[..., 1]
+            else:
+                betting_size = torch.zeros_like(action_hist)
             alpha_tensor = None
             beta_tensor = None
             if self.mode == "normal":
@@ -372,7 +383,10 @@ class PPO(OnPolicyAlgorithm):
             if not self.discrete:
                 logp_all = dist_old.log_prob(safe_actions)
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                if logp_all.shape[-1] > 1:
+                    logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                else:
+                    logp_old = logp_all[:, 0]
             else:
                 logp_old = dist_old.log_prob(safe_actions)
 
@@ -413,10 +427,13 @@ class PPO(OnPolicyAlgorithm):
             if not self.discrete:
                 logp_all = dist.log_prob(safe_actions)
                 is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-
                 entropy_all = dist.entropy()
-                entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+                if logp_all.shape[-1] > 1:
+                    logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                    entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+                else:
+                    logp = logp_all[:, 0]
+                    entropy = entropy_all[:, 0]
             else:
                 logp = dist.log_prob(safe_actions)
                 entropy = dist.entropy()
@@ -466,8 +483,11 @@ class PPO(OnPolicyAlgorithm):
         with torch.no_grad():
             dist = self.get_model_policy(self.network, states, batch_rnn_states)
             samples = dist.sample((1000,))
-            action_hist = samples[:, :, 0]
-            betting_size = samples[:, :, 1]
+            action_hist = samples[..., 0]
+            if samples.shape[-1] > 1:
+                betting_size = samples[..., 1]
+            else:
+                betting_size = torch.zeros_like(action_hist)
             alpha_tensor = None
             beta_tensor = None
             if self.mode == "normal":
@@ -534,6 +554,8 @@ class PPOInferenceWrapper:
         return self
 
     def preprocess_batch(self, states_list, actors_list):
+        from src.game_registry import get_current_game_config
+        StatePreprocessor = get_current_game_config()['state_preprocessor']
         preprocessor = StatePreprocessor()
         batch_dict = {}
         for s, a in zip(states_list, actors_list):
@@ -696,7 +718,7 @@ class RNNPPO(PPO):
         return padded_dict, mask
 
     def _unroll_policy(self, states_dict, h_0, g_0, new_hand_mask):
-        max_seq_len = states_dict['num_players'].size(1)
+        max_seq_len = next(iter(states_dict.values())).size(1)
         all_dist_params = []
         h = h_0
         g = g_0
@@ -739,7 +761,7 @@ class RNNPPO(PPO):
                 return Beta(alpha, beta)
 
     def _unroll_value(self, states_dict, h_0, g_0, new_hand_mask):
-        max_seq_len = states_dict['num_players'].size(1)
+        max_seq_len = next(iter(states_dict.values())).size(1)
         all_values = []
         h = h_0
         g = g_0
@@ -789,7 +811,10 @@ class RNNPPO(PPO):
             if not self.discrete:
                 logp_all = dist_old.log_prob(safe_actions)
                 is_raise = (safe_actions[:, :, 0] >= Action.get_raise_threshold()).float()
-                logp_old = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
+                if logp_all.shape[-1] > 1:
+                    logp_old = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
+                else:
+                    logp_old = logp_all[:, :, 0]
             else:
                 logp_old = dist_old.log_prob(safe_actions)
 
@@ -838,9 +863,13 @@ class RNNPPO(PPO):
                 if not self.discrete:
                     logp_all = dist.log_prob(mb_safe_actions)
                     is_raise = (mb_safe_actions[:, :, 0] >= Action.get_raise_threshold()).float()
-                    logp = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
                     entropy_all = dist.entropy()
-                    entropy = entropy_all[:, :, 0] + (entropy_all[:, :, 1] * is_raise)
+                    if logp_all.shape[-1] > 1:
+                        logp = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
+                        entropy = entropy_all[:, :, 0] + (entropy_all[:, :, 1] * is_raise)
+                    else:
+                        logp = logp_all[:, :, 0]
+                        entropy = entropy_all[:, :, 0]
                 else:
                     logp = dist.log_prob(mb_safe_actions)
                     entropy = dist.entropy()
@@ -881,7 +910,10 @@ class RNNPPO(PPO):
             dist = self._unroll_policy(batched_states_dict, h_0, g_0, padded_new_hands)
             samples = dist.sample((1000,))
             action_hist = samples[..., 0]
-            betting_size = samples[..., 1]
+            if samples.shape[-1] > 1:
+                betting_size = samples[..., 1]
+            else:
+                betting_size = torch.zeros_like(action_hist)
             alpha_tensor = beta_tensor = None
 
             if self.mode == "normal":

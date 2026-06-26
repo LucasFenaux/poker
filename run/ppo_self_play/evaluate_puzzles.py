@@ -12,7 +12,8 @@ from pokerkit import calculate_equities, parse_range, Deck, StandardHighHand, Ca
 
 # --- Local Project Imports ---
 from src.state_interpreter import StateSnapshot
-from src.action_interpreter import ActionInterpreter, Action
+
+from src.action_interpreter import Action
 from evaluate import get_latest_run_folder
 from src.ppo_self_play.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
 from src.ppo_self_play.global_settings import IS_RECURRENT
@@ -197,6 +198,8 @@ def plot_population_parameters(puzzle_params: dict, run_folder: str):
 
 def evaluate_puzzles(run_folder, explicit_model_path=None):
     device = torch.device("cpu")
+    from src.game_registry import get_current_game_config
+    ActionInterpreter = get_current_game_config()['action_interpreter']
     action_interpreter = ActionInterpreter()
 
     puzzles = build_puzzle_suite()

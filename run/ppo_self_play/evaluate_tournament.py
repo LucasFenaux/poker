@@ -8,7 +8,8 @@ from pokerkit import NoLimitTexasHoldem, Automation
 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
-from src.action_interpreter import ActionInterpreter, Action
+from src.game_registry import get_current_game_config
+from src.action_interpreter import Action
 from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
 from evaluate import get_latest_run_folder
 from src.ppo_self_play.global_settings import IS_RECURRENT
@@ -69,25 +70,21 @@ def play_tournament_hand(player_ids, population, action_interpreter, small_blind
     starting_chips = starting_bb * big_blind
     starting_stacks = [starting_chips] * len(player_ids)
 
-    state = NoLimitTexasHoldem.create_state(
-        (
-            Automation.ANTE_POSTING,
-            Automation.BET_COLLECTION,
-            Automation.BLIND_OR_STRADDLE_POSTING,
-            Automation.CARD_BURNING,
-            Automation.HOLE_DEALING,
-            Automation.BOARD_DEALING,
-            Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
-            Automation.HAND_KILLING,
-            Automation.CHIPS_PUSHING,
-            Automation.CHIPS_PULLING,
-        ),
-        ante_trimming_status=True,
-        raw_antes=0,
-        raw_blinds_or_straddles=(small_blind, big_blind),
-        min_bet=big_blind,
-        raw_starting_stacks=starting_stacks,
-        player_count=len(player_ids)
+    game_config = get_current_game_config()
+    table_param_generator = game_config['table_param_generator']
+    PokerkitGame = game_config['pokerkit_game']
+    pokerkit_automations = game_config['pokerkit_automations']
+    
+    table_params = table_param_generator(
+        table_size=len(player_ids),
+        small_blind=small_blind,
+        big_blind=big_blind,
+        bb_starting_stacks=starting_bb
+    )
+
+    state = PokerkitGame.create_state(
+        pokerkit_automations,
+        **table_params
     )
 
     hand_memories = {pid: None for pid in player_ids}
@@ -214,25 +211,21 @@ def showcase_hand(p1_id, p2_id, population, action_interpreter, hand_num):
     print(f"\n🎬 --- SHOWCASE HAND #{hand_num} : [ID {p1_id}] vs [ID {p2_id}] ---")
 
     player_ids = [p1_id, p2_id]
-    state = NoLimitTexasHoldem.create_state(
-        (
-            Automation.ANTE_POSTING,
-            Automation.BET_COLLECTION,
-            Automation.BLIND_OR_STRADDLE_POSTING,
-            Automation.CARD_BURNING,
-            Automation.HOLE_DEALING,
-            Automation.BOARD_DEALING,
-            Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
-            Automation.HAND_KILLING,
-            Automation.CHIPS_PUSHING,
-            Automation.CHIPS_PULLING,
-        ),
-        ante_trimming_status=True,
-        raw_antes=0,
-        raw_blinds_or_straddles=(1, 2),
-        min_bet=2,
-        raw_starting_stacks=[200, 200],
-        player_count=2
+    game_config = get_current_game_config()
+    table_param_generator = game_config['table_param_generator']
+    PokerkitGame = game_config['pokerkit_game']
+    pokerkit_automations = game_config['pokerkit_automations']
+    
+    table_params = table_param_generator(
+        table_size=2,
+        small_blind=1,
+        big_blind=2,
+        bb_starting_stacks=100
+    )
+
+    state = PokerkitGame.create_state(
+        pokerkit_automations,
+        **table_params
     )
 
     big_blind = state.blinds_or_straddles[-1]

@@ -12,7 +12,7 @@ import numpy as np
 from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED, IS_RECURRENT
 from src.ppo_self_play.alg import PPO, RNNPPO
 from src.ppo_self_play.trainer_actor import TrainerActor
-from src.ppo_self_play.table_actor import TableActor
+from src.game_registry import get_current_game_config
 from src.ppo_self_play.leaderboard_actor import LeaderboardActor
 from src.ppo_self_play.data_storage import DataStorage
 from src.player_ai import PlayerAI, RNNPlayerAI
@@ -245,7 +245,9 @@ class CasinoManager:
             os.makedirs(self.save_folder, exist_ok=True)
             self.player_save_folder = os.path.join(save_folder, "players")
             os.makedirs(self.player_save_folder, exist_ok=True)
-            self.log_folder = os.path.join(save_folder, "logs")
+            run_name = os.path.basename(save_folder)
+            self.log_folder = os.path.join(os.path.dirname(save_folder), "tb_logs", run_name)
+            os.makedirs(self.log_folder, exist_ok=True)
             self.mode = "beta"
 
             manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
@@ -304,6 +306,7 @@ class CasinoManager:
             print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
                   f"{self.table_max_size}...")
             self.table_ids = [table_id for table_id in range(NUM_TABLES)]
+            TableActor = get_current_game_config()['table_actor']
             self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                              self.table_max_size, discrete, self.mode,
                                              self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
@@ -329,11 +332,12 @@ class CasinoManager:
 
             self.discrete = discrete
             # min and max stack params are defined in terms of # of big blinds
-            self.min_stack = 100
-            self.max_stack = 100
-            self.min_bb_ratio = 2
-            self.max_bb_ratio = 2
-            self.min_allowed_start_bb = 10
+            config = get_current_game_config()
+            self.min_stack = config["min_stack"]
+            self.max_stack = config["max_stack"]
+            self.min_bb_ratio = config["min_bb_ratio"]
+            self.max_bb_ratio = config["max_bb_ratio"]
+            self.min_allowed_start_bb = config["min_allowed_start_bb"]
             self.stop_event = threading.Event()
         except Exception as e:
             traceback.print_exc()
@@ -510,6 +514,7 @@ class CasinoManager:
                     table_id += 1
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
+                TableActor = get_current_game_config()['table_actor']
                 new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
                                       self.table_max_size, self.discrete, self.mode, self.batch_size)
                 self.tables.append(new_table)
@@ -552,17 +557,18 @@ class CasinoManager:
                         activity_this_loop = True
                         table_size = len(list(player_ids))
 
+                        game_config = get_current_game_config()
+                        table_param_generator = game_config['table_param_generator']
                         small_blind = 1
                         big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
                         bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-                        starting_stacks = bb_starting_stacks * big_blind
-
-                        table_params = {
-                            "raw_blinds_or_straddles": (small_blind, big_blind),
-                            "min_bet": big_blind,
-                            "raw_starting_stacks": starting_stacks,
-                            "player_count": table_size
-                        }
+                        
+                        table_params = table_param_generator(
+                            table_size=table_size,
+                            small_blind=small_blind,
+                            big_blind=big_blind,
+                            bb_starting_stacks=bb_starting_stacks
+                        )
 
                         data = {
                             "type": "players",
@@ -612,18 +618,18 @@ class CasinoManager:
             while player_ids is not None:
                 table_size = len(list(player_ids))
                 # spin up a table
+                game_config = get_current_game_config()
+                table_param_generator = game_config['table_param_generator']
                 small_blind = 1
                 big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-                # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
                 bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-                starting_stacks = bb_starting_stacks * big_blind
-
-                table_params = {
-                    "raw_blinds_or_straddles": (small_blind, big_blind),
-                    "min_bet": big_blind,
-                    "raw_starting_stacks": starting_stacks,
-                    "player_count": table_size
-                }
+                
+                table_params = table_param_generator(
+                    table_size=table_size,
+                    small_blind=small_blind,
+                    big_blind=big_blind,
+                    bb_starting_stacks=bb_starting_stacks
+                )
                 # gather the player's parameters and send it all
                 data = {
                     "type": "players",

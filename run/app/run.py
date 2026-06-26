@@ -13,9 +13,17 @@ from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 def get_latest_run_folder(base_path="results"):
-    runs = glob.glob(os.path.join(base_path, "run_*"))
+    from src.ppo_self_play.global_settings import GAME_TYPE
+    runs = glob.glob(os.path.join(base_path, f"run_{GAME_TYPE}_*"))
+    
+    if not runs and GAME_TYPE == "HOLDEM":
+        all_runs = glob.glob(os.path.join(base_path, "run_*"))
+        from src.ppo_self_play.global_settings import GAME_TYPES
+        other_games = [gt for gt in GAME_TYPES if gt != "HOLDEM"]
+        runs = [r for r in all_runs if not any(os.path.basename(r).startswith(f"run_{gt}_") for gt in other_games)]
+
     if not runs:
-        raise ValueError(f"No run folders found in {base_path}")
+        raise ValueError(f"No run folders found in {base_path} for GAME_TYPE={GAME_TYPE}")
     return max(runs, key=os.path.getmtime)
 
 

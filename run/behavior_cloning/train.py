@@ -14,9 +14,9 @@ from torch.nn.utils.rnn import pad_sequence
 
 from src.action_interpreter import Action
 from src.models import load_model, get_value_model
-from src.state_interpreter import StatePreprocessor
-from src.ppo_self_play.global_settings import IS_RECURRENT
-from src.ppo_self_play.alg import RNNPPO
+from src.game_registry import get_current_game_config
+from src.ppo_self_play.global_settings import IS_RECURRENT, GAME_TYPE
+from src.ppo_self_play.alg import RNNPPO, PPO
 from torch.distributions.normal import Normal
 from torch.distributions.beta import Beta
 
@@ -27,7 +27,7 @@ lr = 1e-4
 value_lr = 2e-3
 entropy_coef = 0.001
 batch_size = 512
-data_folder = f"./data/{'rnn' if IS_RECURRENT else 'no_mem'}/"
+data_folder = f"./data/{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}/"
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -43,6 +43,8 @@ else:
 class PokerBehaviorCloningDataset(Dataset):
     def __init__(self, data_dir: str):
         self.data_items = []
+        from src.game_registry import get_current_game_config
+        StatePreprocessor = get_current_game_config()['state_preprocessor']
         preprocessor = StatePreprocessor()
 
         print(f"Loading dataset chunks (IS_RECURRENT={IS_RECURRENT})...")
@@ -114,7 +116,12 @@ class PokerBehaviorCloningDataset(Dataset):
                                                          "board_ranks", "board_suits"] else torch.float32)
             for k, v in processed_dict.items()
         }
-        return [act_target, bet_target], tensor_dict
+        from src.game_registry import get_current_game_config
+        action_size = get_current_game_config()['action_size']
+        if action_size == 1:
+            return [act_target], tensor_dict
+        else:
+            return [act_target, bet_target], tensor_dict
 
     def __len__(self):
         return len(self.data_items)
@@ -152,7 +159,8 @@ def rnn_collate_fn(batch):
 # ==========================================
 def _unroll_policy_bc(model, states_dict, h_0, g_0):
     """Unrolls the 3D sequence step-by-step to prevent GRUCell dimensionality crashes."""
-    max_seq_len = states_dict['num_players'].size(1)
+    first_key = list(states_dict.keys())[0]
+    max_seq_len = states_dict[first_key].size(1)
     all_dist_params = []
     h, g = h_0, g_0
 
@@ -176,7 +184,8 @@ def _unroll_policy_bc(model, states_dict, h_0, g_0):
 
 def _unroll_value_bc(value_model, states_dict, h_0, g_0):
     """Unrolls the 3D sequence step-by-step for the Value model."""
-    max_seq_len = states_dict['num_players'].size(1)
+    first_key = list(states_dict.keys())[0]
+    max_seq_len = states_dict[first_key].size(1)
     all_values = []
     h, g = h_0, g_0
 
@@ -216,8 +225,12 @@ def train_flat_epoch(model, value_model, optimizer, value_optimizer, train_loade
             entropy_all = dist.entropy()
 
             is_raise = (targets[:, 0] >= Action.get_raise_threshold()).float()
-            logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-            entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+            if logp_all.shape[-1] > 1:
+                logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
+                entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
+            else:
+                logp = logp_all[:, 0]
+                entropy = entropy_all[:, 0]
 
             p_loss = -logp.mean()
             e_loss = entropy.mean()
@@ -271,8 +284,12 @@ def train_rnn_epoch(model, value_model, optimizer, value_optimizer, train_loader
             entropy_all = dist.entropy()
 
             is_raise = (targets[:, :, 0] >= Action.get_raise_threshold()).float()
-            logp = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
-            entropy = entropy_all[:, :, 0] + (entropy_all[:, :, 1] * is_raise)
+            if logp_all.shape[-1] > 1:
+                logp = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
+                entropy = entropy_all[:, :, 0] + (entropy_all[:, :, 1] * is_raise)
+            else:
+                logp = logp_all[:, :, 0]
+                entropy = entropy_all[:, :, 0]
 
             p_loss_unreduced = -logp
             p_loss = (p_loss_unreduced * mask).sum() / mask.sum()
@@ -320,8 +337,9 @@ def evaluate_and_plot(model, data_loader, device, num_batches=10):
                 true_actions.extend(valid_targets[:, 0])
                 pred_actions.extend(valid_samples[:, 0])
                 is_raise = valid_targets[:, 0] >= Action.get_raise_threshold()
-                true_bets.extend(valid_targets[is_raise, 1])
-                pred_bets.extend(valid_samples[is_raise, 1])
+                if valid_targets.shape[-1] > 1:
+                    true_bets.extend(valid_targets[is_raise, 1])
+                    pred_bets.extend(valid_samples[is_raise, 1])
         else:
             for i, (states_dict, targets, rewards) in enumerate(data_loader):
                 if i >= num_batches: break
@@ -334,8 +352,9 @@ def evaluate_and_plot(model, data_loader, device, num_batches=10):
                 true_actions.extend(targets_np[:, 0])
                 pred_actions.extend(samples[:, 0])
                 is_raise = targets_np[:, 0] >= Action.get_raise_threshold()
-                true_bets.extend(targets_np[is_raise, 1])
-                pred_bets.extend(samples[is_raise, 1])
+                if targets_np.shape[-1] > 1:
+                    true_bets.extend(targets_np[is_raise, 1])
+                    pred_bets.extend(samples[is_raise, 1])
 
     def categorize_action(val):
         if val < Action.get_call_threshold():
@@ -349,22 +368,25 @@ def evaluate_and_plot(model, data_loader, device, num_batches=10):
     pred_act_labels = [categorize_action(a) for a in pred_actions]
 
     sns.set_theme(style="whitegrid")
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    has_bets = len(true_bets) > 0
+    fig, axes = plt.subplots(1, 2 if has_bets else 1, figsize=(14 if has_bets else 7, 5))
+    ax_act = axes[0] if has_bets else axes
 
-    sns.histplot(x=true_act_labels, color="blue", alpha=0.5, label="Baseline Bot (Target)", ax=axes[0],
+    sns.histplot(x=true_act_labels, color="blue", alpha=0.5, label="Baseline Bot (Target)", ax=ax_act,
                  stat="proportion", discrete=True, shrink=0.8)
-    sns.histplot(x=pred_act_labels, color="orange", alpha=0.5, label="Trained Model", ax=axes[0], stat="proportion",
+    sns.histplot(x=pred_act_labels, color="orange", alpha=0.5, label="Trained Model", ax=ax_act, stat="proportion",
                  discrete=True, shrink=0.8)
-    axes[0].set_title("Action Decision Distribution")
-    axes[0].set_ylabel("Proportion of Actions")
-    axes[0].legend()
+    ax_act.set_title("Action Decision Distribution")
+    ax_act.set_ylabel("Proportion of Actions")
+    ax_act.legend()
 
-    sns.kdeplot(true_bets, color="blue", fill=True, alpha=0.3, label="Baseline Bot", ax=axes[1], clip=(0, 1))
-    sns.kdeplot(pred_bets, color="orange", fill=True, alpha=0.3, label="Trained Model", ax=axes[1], clip=(0, 1))
-    axes[1].set_title("Bet Sizing Distribution (When Raising)")
-    axes[1].set_xlabel("Scaled Bet Size [0, 1]")
-    axes[1].set_ylabel("Density")
-    axes[1].legend()
+    if has_bets:
+        sns.kdeplot(true_bets, color="blue", fill=True, alpha=0.3, label="Baseline Bot", ax=axes[1], clip=(0, 1))
+        sns.kdeplot(pred_bets, color="orange", fill=True, alpha=0.3, label="Trained Model", ax=axes[1], clip=(0, 1))
+        axes[1].set_title("Bet Sizing Distribution (When Raising)")
+        axes[1].set_xlabel("Scaled Bet Size [0, 1]")
+        axes[1].set_ylabel("Density")
+        axes[1].legend()
 
     plt.tight_layout()
     plt.savefig("bc_distribution_comparison.png", dpi=300)
@@ -379,13 +401,11 @@ if __name__ == '__main__':
     dataset = PokerBehaviorCloningDataset(data_dir=data_folder)
 
     if IS_RECURRENT:
-        # rnn_batch_size = max(1, batch_size // 10)
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=rnn_collate_fn)
         model, value_model = RNNPPO.init_networks(device, discrete=False, mode="beta")
     else:
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        model = load_model(player_id=0, device=device, deterministic=False, mode="beta")
-        value_model = get_value_model(device=device)
+        model, value_model = PPO.init_networks(device, discrete=False, mode="beta")
 
     if IS_RECURRENT:
         print("Freezing game_gru parameters to prevent Learned Amnesia during BC...")
@@ -408,6 +428,6 @@ if __name__ == '__main__':
             train_flat_epoch(model, value_model, optimizer, value_optimizer, train_loader, epoch)
 
     print("Pre-training complete! Ready for Self-Play.")
-    torch.save([model.state_dict(), value_model.state_dict()], f"bc_pretrained_model_no_log_{'rnn' if IS_RECURRENT else 'no_mem'}.pt")
+    torch.save([model.state_dict(), value_model.state_dict()], f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt")
 
     evaluate_and_plot(model, train_loader, device, num_batches=10)
