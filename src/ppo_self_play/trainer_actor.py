@@ -1,21 +1,27 @@
+import os
+import traceback
+
 import ray
 from ray.util.queue import Queue, Empty
 import torch
-import os
 from torch.utils.tensorboard import SummaryWriter
 
-from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.alg import PPO, RNNPPO
+from src.ppo_self_play.global_settings import IS_RECURRENT
+
 
 @ray.remote(num_cpus=1)
 class TrainerActor:
     def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
                  player_save_folder: str, mode: str) -> None:
-        # torch.set_num_threads(8)
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.mode = mode
-        self.models = PPO.init_networks(device, discrete, mode)
+        if IS_RECURRENT:
+            self.models = PPO.init_networks(device, discrete, mode)
+        else:
+            self.models = RNNPPO.init_networks(device, discrete, mode)
         self.device = device
         self.discrete = discrete
         self.num_training_ran = 0
@@ -29,15 +35,32 @@ class TrainerActor:
 
     def run(self, player_id, player_state_dicts, data_batch, player_training_count: int, optimizer_state_dict = None):
         try:
-            alg = PPO(device=self.device, mode=self.mode, discrete=self.discrete, **PPO.default_hyperparameters)
+            if len(data_batch["rewards"]) == 0:
+                # The player took zero actions in this batch.
+                # Return the original weights immediately without running SGD.
+                message = {
+                    "type": "player",
+                    "player_id": player_id,
+                    "new_weights": player_state_dicts,
+                    "new_optimizer_params": optimizer_state_dict,
+                }
+                self.out_queue.put(message)
+                return player_state_dicts, optimizer_state_dict
+
+            if IS_RECURRENT:
+                alg = RNNPPO(device=self.device, mode=self.mode, discrete=self.discrete, **RNNPPO.default_hyperparameters)
+            else:
+                alg = PPO(device=self.device, mode=self.mode, discrete=self.discrete, **PPO.default_hyperparameters)
             alg.load_params(player_state_dicts)
             if optimizer_state_dict is not None:
                 alg.load_optimizer_params(optimizer_state_dict)
             # run the model update
             metrics = alg.update(data_batch["states"], data_batch["rewards"], data_batch["actions"],
                                  batch_rnn_states=data_batch.get("batch_rnn_states", None),
-                                 sample_weights=data_batch.get("sample_weights", None))
-            batch_size = len(data_batch["rewards"])
+                                 sample_weights=data_batch.get("sample_weights", None),
+                                 new_hands=data_batch.get("new_hands", []))
+
+            batch_size = len(data_batch["rewards"])  # NOTE: in the case of RNN model, this is the number of games, no number of transitions. [GAMES[Transitions]]
             # trainer metrics
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Loss", metrics["loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)
@@ -78,6 +101,8 @@ class TrainerActor:
             return new_weights, new_optimizer_params
         except Exception as e:
             print(f"Exception: {e} encountered in Trainer {self.trainer_id} training player: {player_id}")
+            if self.trainer_id == 0:
+                traceback.print_exc()
             # abort training and send back the original weights
             message = {
                 "type": "player",
@@ -119,21 +144,36 @@ class TrainerActor:
                 actions = []
                 sample_weights = []
                 current_actors = []
-
+                new_hands = []
                 # parse the batch data
                 sub_batches = ray.get(data["batch_ref"])
                 for sub_batch in sub_batches:
-                    states.extend(sub_batch["states"])
-                    rewards.extend(sub_batch["rewards"])
-                    actions.extend(sub_batch["actions"])
-                    sample_weights.extend(sub_batch["sample_weights"])
-                    current_actors.extend(sub_batch["current_actors"])
+                    if IS_RECURRENT:
+                        # We MUST filter out empty games to prevent padding crashes
+                        for i in range(len(sub_batch["rewards"])):
+                            if len(sub_batch["rewards"][i]) > 0:
+                                states.append(sub_batch["states"][i])
+                                rewards.append(sub_batch["rewards"][i])
+                                actions.append(sub_batch["actions"][i])
+                                sample_weights.append(sub_batch["sample_weights"][i])
+                                current_actors.append(sub_batch["current_actors"][i])
+                                if "new_hands" in sub_batch:
+                                    new_hands.append(sub_batch["new_hands"][i])
+                    else:
+                        states.extend(sub_batch["states"])
+                        rewards.extend(sub_batch["rewards"])
+                        actions.extend(sub_batch["actions"])
+                        sample_weights.extend(sub_batch["sample_weights"])
+                        current_actors.extend(sub_batch["current_actors"])
+                        if "new_hands" in sub_batch:
+                            new_hands.extend(sub_batch["new_hands"])
 
                 batch = {
                     "states": (states, current_actors),
                     "rewards": rewards,
                     "actions": actions,
                     "sample_weights": sample_weights,
+                    "new_hands": new_hands
                 }
                 # batch = ray.get(data["batch_ref"])
                 player_training_count = data["player_training_count"]
@@ -143,7 +183,7 @@ class TrainerActor:
                     self.save_player(player_id, params)
             except Exception as e:
                 print(f"CRITICAL TRAINER CRASH! Rescuing player {player_id}: {e}")
-
+                traceback.print_exc()
                 # If we couldn't even get the player ref, we have to fake the weights
                 # to prevent the manager from crashing on receipt.
                 fallback_weights = player.get_params() if 'player' in locals() else None

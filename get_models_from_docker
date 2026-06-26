@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# Define our container and paths to make the script easy to read and edit
+CONTAINER_NAME="poker-casino_backend-1"
+BASE_DIR="/app/results"
+
+echo "Fetching run directories from the container..."
+
+# 1. Get all the names of the folders inside the container's results directory
+runs=$(docker exec "$CONTAINER_NAME" ls "$BASE_DIR")
+
+# 2. Loop through every folder name we found
+for run in $runs; do
+
+    # 3. Check if the 'players' directory actually exists for this specific run
+    # The '[ -d ... ]' command checks if a directory exists
+    if docker exec "$CONTAINER_NAME" sh -c "[ -d $BASE_DIR/$run/players ]"; then
+        echo "Copying players data for run: $run"
+
+        # 4. Create the local directory structure (the -p flag prevents errors if the folder already exists)
+        mkdir -p "./$run"
+
+        # 5. Copy just the players folder into our local matching structure
+        docker cp "$CONTAINER_NAME:$BASE_DIR/$run/players" "./$run/"
+    else
+        echo "No players folder found in $run, skipping..."
+    fi
+
+done
+
+echo "Copy process is complete!"

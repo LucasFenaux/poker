@@ -7,7 +7,7 @@ from scipy import stats
 import time  # <-- Imported the time module
 
 # --- Local Project Imports ---
-from src.action_interpreter import ActionInterpreter
+
 
 # --- Import Shared Logic from evaluate.py ---
 from evaluate import (
@@ -20,6 +20,8 @@ from evaluate import (
 
 def evaluate_population(num_games, run_folder, max_table_size):
     device = torch.device("cpu")
+    from src.game_registry import get_current_game_config
+    ActionInterpreter = get_current_game_config()['action_interpreter']
     action_interpreter = ActionInterpreter()
     baseline_bot = FastBaselineBot(player_index=0)
 

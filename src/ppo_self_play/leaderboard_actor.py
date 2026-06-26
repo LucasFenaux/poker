@@ -35,6 +35,7 @@ class LeaderboardActor:
         self.save_folder = save_folder
         self.history_player_winnings = {player_id: [] for player_id in player_ids}
         self.player_ids = player_ids
+        self.recent_avg_lookback = 100
         # New per-player game counter
         self.number_games_played = {player_id: 0 for player_id in player_ids}
         self.is_done = False
@@ -168,8 +169,8 @@ class LeaderboardActor:
             history = self.history_player_winnings[p_id]
 
             total_winnings = sum(history)
-            # Slice the last 10 games and calculate average
-            recent_history = history[-10:] if len(history) >= 10 else history
+            # Slice the last 100 games and calculate average
+            recent_history = history[-self.recent_avg_lookback:] if len(history) >= self.recent_avg_lookback else history
             recent_avg = sum(recent_history) / len(recent_history) if recent_history else 0
 
             # Anomaly detection

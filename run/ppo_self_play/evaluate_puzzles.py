@@ -12,9 +12,11 @@ from pokerkit import calculate_equities, parse_range, Deck, StandardHighHand, Ca
 
 # --- Local Project Imports ---
 from src.state_interpreter import StateSnapshot
-from src.action_interpreter import ActionInterpreter, Action
+
+from src.action_interpreter import Action
 from evaluate import get_latest_run_folder
-from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 @dataclass
@@ -24,30 +26,37 @@ class PokerPuzzle:
     snapshot: StateSnapshot
     actor_index: int
     acceptable_actions: list[Action]
+    acceptable_bet_range: tuple[float, float] = None  # NEW: (min_bet, max_bet) for evaluating sizing
     baseline_ev: float = 0.0
 
 
 def load_eval_models(model_path, device):
-    """Custom loader that extracts BOTH the Policy and Value networks."""
-    policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
+    """Custom loader that extracts BOTH the Wrapper and Value networks."""
+    # ---> NEW: Branch network initialization <---
+    if IS_RECURRENT:
+        policy_net, value_net = RNNPPO.init_networks(device, mode="beta", discrete=False)
+        wrapper = RNNPPOInferenceWrapper((policy_net,), discrete=False)
+    else:
+        policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
+        wrapper = PPOInferenceWrapper((policy_net,), discrete=False)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
 
-    # Handle both PPO tuple format and pure BC list format smoothly
     if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
         checkpoint = loaded_data[0]
     else:
         checkpoint = loaded_data
+    if IS_RECURRENT:
+        wrapper.load_params(checkpoint)
+    else:
+        wrapper.load_params((checkpoint[0],))
+    wrapper.to(device)
 
-    policy_net.load_state_dict(checkpoint[0])
     value_net.load_state_dict(checkpoint[1])
-
-    policy_net.to(device)
     value_net.to(device)
-    policy_net.eval()
     value_net.eval()
 
-    return policy_net, value_net
+    return wrapper, value_net
 
 
 def build_puzzle_suite() -> list[PokerPuzzle]:
@@ -56,6 +65,7 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
     puzzles.append(PokerPuzzle(
         name="AA Facing Shove", description="Preflop: Holding Pocket Aces facing a 100BB All-In.", actor_index=1,
         acceptable_actions=[Action.CHECK_OR_CALL, Action.RAISE],
+        acceptable_bet_range=(98.0, 98.0), # If they raise, it effectively has to be max bet
         snapshot=StateSnapshot(hole_cards="AsAc", board_cards="??????????", player_count=2, blinds_or_straddles=(1, 2),
                                bets=[100.0, 2.0], stacks=[0.0, 98.0], in_hand=[True, True], pots=[0.0],
                                min_bet=98.0, max_bet=98.0)
@@ -72,6 +82,7 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
     puzzles.append(PokerPuzzle(
         name="Nut Flush River", description="River: Holding the Nut Flush facing a half-pot bet.", actor_index=0,
         acceptable_actions=[Action.CHECK_OR_CALL, Action.RAISE],
+        acceptable_bet_range=(30.0, 30.0), # Raising should be an All-In shove for max value
         snapshot=StateSnapshot(hole_cards="AhKh", board_cards="2h7hThQc4h", player_count=2, blinds_or_straddles=(1, 2),
                                bets=[0.0, 20.0], stacks=[30.0, 10.0], in_hand=[True, True], pots=[40.0],
                                min_bet=20.0, max_bet=30.0)
@@ -89,6 +100,7 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
     puzzles.append(PokerPuzzle(
         name="Short Stack AKo", description="Preflop: Holding AKo with only 5 Big Blinds. Must shove.", actor_index=0,
         acceptable_actions=[Action.RAISE],
+        acceptable_bet_range=(4.0, 4.0), # Must shove their remaining 4BB
         snapshot=StateSnapshot(hole_cards="AsKd", board_cards="??????????", player_count=2, blinds_or_straddles=(1, 2),
                                bets=[1.0, 2.0], stacks=[4.0, 98.0], in_hand=[True, True], pots=[0.0],
                                min_bet=1.0, max_bet=4.0)
@@ -97,6 +109,7 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
     puzzles.append(PokerPuzzle(
         name="Flopped Quads", description="Flop: Holding Quads facing a small continuation bet.", actor_index=1,
         acceptable_actions=[Action.CHECK_OR_CALL, Action.RAISE],
+        acceptable_bet_range=(5.0, 25.0), # Trap or small raise. Over-betting here is poor sizing.
         snapshot=StateSnapshot(hole_cards="Td9s", board_cards="ThTsTc????", player_count=2, blinds_or_straddles=(1, 2),
                                bets=[5.0, 0.0], stacks=[85.0, 90.0], in_hand=[True, True], pots=[10.0],
                                min_bet=5.0, max_bet=85.0)
@@ -105,6 +118,7 @@ def build_puzzle_suite() -> list[PokerPuzzle]:
     puzzles.append(PokerPuzzle(
         name="KK Facing Open", description="Preflop: Holding Pocket Kings facing a standard 3BB open.", actor_index=1,
         acceptable_actions=[Action.CHECK_OR_CALL, Action.RAISE],
+        acceptable_bet_range=(8.0, 15.0), # A standard 3-bet size (approx 3x-5x the 3BB open)
         snapshot=StateSnapshot(hole_cards="KsKc", board_cards="??????????", player_count=2, blinds_or_straddles=(1, 2),
                                bets=[3.0, 2.0], stacks=[97.0, 98.0], in_hand=[True, True], pots=[0.0],
                                min_bet=1.0, max_bet=97.0)
@@ -169,10 +183,10 @@ def plot_population_parameters(puzzle_params: dict, run_folder: str):
         ax.set_xlabel("Alpha (Pushing towards Raise)", fontsize=10)
         ax.set_ylabel("Beta (Pushing towards Fold)", fontsize=10)
 
-        ax.set_xlim(-2, 52)
-        ax.set_ylim(-2, 52)
+        ax.set_xlim(-2, 502)
+        ax.set_ylim(-2, 502)
 
-        ax.plot([-2, 52], [-2, 52], 'r--', alpha=0.5, label="Confusion (Mean 0.5)")
+        ax.plot([-2, 502], [-2, 502], 'r--', alpha=0.5, label="Confusion (Mean 0.5)")
         ax.legend(loc='upper left', fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
 
@@ -184,12 +198,13 @@ def plot_population_parameters(puzzle_params: dict, run_folder: str):
 
 def evaluate_puzzles(run_folder, explicit_model_path=None):
     device = torch.device("cpu")
+    from src.game_registry import get_current_game_config
+    ActionInterpreter = get_current_game_config()['action_interpreter']
     action_interpreter = ActionInterpreter()
 
     puzzles = build_puzzle_suite()
     puzzles = calculate_math_evs(puzzles)
 
-    # Use the explicit path if provided, otherwise search the run folder
     if explicit_model_path:
         model_files = [explicit_model_path]
     else:
@@ -225,22 +240,60 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
 
             for puzzle in puzzles:
                 with torch.no_grad():
-                    policy = policy_net(puzzle.snapshot, puzzle.actor_index)
-                    raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
+                    # policy = policy_net(puzzle.snapshot, puzzle.actor_index)
+                    if IS_RECURRENT:
+                        policy, _ = policy_net.get_model_policy(policy_net.network, (puzzle.snapshot, puzzle.actor_index))
+                    else:
+                        policy = policy_net.get_model_policy(policy_net.network, (puzzle.snapshot, puzzle.actor_index))
 
-                    # sign = 1.0 if raw_value_pred >= 0 else -1.0
-                    # true_value_pred = sign * (np.exp(abs(raw_value_pred)) - 1.0)
+                    # Preprocess state properly for the value net
+                    batched_dict = policy_net.preprocess_batch([puzzle.snapshot], [puzzle.actor_index])
+
+                    if IS_RECURRENT:
+                        # Initialize empty hidden states for a single isolated snapshot
+                        h_0 = torch.zeros(1, value_net.hand_memory_size, device=device)
+                        g_0 = torch.zeros(1, value_net.game_memory_size, device=device)
+
+                        # The recurrent value net returns a tuple: (value_prediction, new_hidden_state)
+                        val_tensor, _ = value_net(batched_dict, hand_hidden=h_0, game_hidden=g_0)
+                        raw_value_pred = val_tensor.item()
+                    else:
+                        # Standard PPO value net just returns the value tensor
+                        raw_value_pred = value_net(batched_dict).item()
+
+                    # raw_value_pred = value_net(puzzle.snapshot, puzzle.actor_index).item()
+
                     true_value_pred = raw_value_pred
 
                     alpha_val = policy.concentration1.squeeze()[0].item()
                     beta_val = policy.concentration0.squeeze()[0].item()
                     action_tensor = policy.mean.cpu().squeeze(0)
 
-                interpreted_action, _ = action_interpreter(
+                # EXTRACT BET SIZING HERE
+                interpreted_action, bet_sizing_fraction = action_interpreter(
                     action_tensor, puzzle.snapshot.min_bet, puzzle.snapshot.max_bet
                 )
+                bet_sizing = float(bet_sizing_fraction)
 
-                passed = interpreted_action in puzzle.acceptable_actions
+                # EVALUATE BOTH ACTION AND BET SIZING
+                passed_action = interpreted_action in puzzle.acceptable_actions
+                passed_bet_size = True
+                bet_str = ""
+
+                if interpreted_action == Action.RAISE:
+                    if puzzle.acceptable_bet_range is not None:
+                        min_b, max_b = puzzle.acceptable_bet_range
+                        # allow minor floating point leniency
+                        if not (min_b - 0.01 <= bet_sizing <= max_b + 0.01):
+                            passed_bet_size = False
+                            bet_str = f" | Bet: {bet_sizing:>5.1f} (Fail: Expected {min_b}-{max_b})"
+                        else:
+                            bet_str = f" | Bet: {bet_sizing:>5.1f} (Size OK)"
+                    else:
+                        bet_str = f" | Bet: {bet_sizing:>5.1f}"
+
+                passed = passed_action and passed_bet_size
+
                 if passed:
                     score += 1
                     puzzle_pass_counts[puzzle.name] += 1
@@ -251,7 +304,7 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
 
                 mark = "✅" if passed else "❌"
                 print(
-                    f"  {mark} [{puzzle.name:<18}] α/β: {alpha_val:>5.2f}/{beta_val:>5.2f} | Pred EV: {true_value_pred:>+6.2f} BB | Math EV: {puzzle.baseline_ev:>+6.2f} BB -> {interpreted_action.name}"
+                    f"  {mark} [{puzzle.name:<18}] α/β: {alpha_val:>5.2f}/{beta_val:>5.2f} | Pred EV: {true_value_pred:>+6.2f} BB | Math EV: {puzzle.baseline_ev:>+6.2f} BB -> {interpreted_action.name}{bet_str}"
                 )
 
             player_scores.append({"id": player_id, "score": score, "total": len(puzzles)})
@@ -292,7 +345,6 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
 
     print("-" * 80)
 
-    # We only plot if we evaluated a population. Plotting a single point scatter plot isn't helpful.
     if len(model_files) > 1:
         plot_population_parameters(puzzle_params, run_folder)
 
@@ -300,7 +352,6 @@ def evaluate_puzzles(run_folder, explicit_model_path=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate Poker AIs against fixed logic puzzles.")
     parser.add_argument("--run_folder", type=str, default=None, help="Path to the run folder")
-    # NEW ARGUMENT
     parser.add_argument("--model_path", type=str, default=None, help="Direct path to a .pt file (Overrides run_folder)")
 
     args = parser.parse_args()

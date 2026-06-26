@@ -1,6 +1,7 @@
 import random
 import threading
 import time
+import traceback
 
 import ray
 from ray.util.queue import Queue, Empty
@@ -8,73 +9,16 @@ import os
 import torch
 import numpy as np
 
-from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED
-from src.ppo_self_play.alg import PPO
+from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED, IS_RECURRENT
+from src.ppo_self_play.alg import PPO, RNNPPO
 from src.ppo_self_play.trainer_actor import TrainerActor
-from src.ppo_self_play.table_actor import TableActor
+from src.game_registry import get_current_game_config
 from src.ppo_self_play.leaderboard_actor import LeaderboardActor
+from src.ppo_self_play.data_storage import DataStorage
+from src.player_ai import PlayerAI, RNNPlayerAI
 import math
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
-
-
-class PlayerAI:
-    def __init__(self, models, optimizer_params=None):
-        self.models = models
-        self.optimizer_params = optimizer_params
-
-    def load_params(self, param_dicts):
-        for model, param_dict in zip(self.models, param_dicts):
-            model.load_state_dict(param_dict)
-
-    def get_params(self):
-        params = []
-        for model in self.models:
-            params.append(model.state_dict())
-        return params
-
-    def load_optimizers(self, optimizer_params):
-        self.optimizer_params = optimizer_params
-
-    def get_optimizer_params(self):
-        return self.optimizer_params
-
-
-# @ray.remote(num_cpus=0)
-class DataStorage:
-    # def __init__(self, in_queue, out_queue, player_ids, batch_size: int, on_policy):
-    def __init__(self, player_ids, batch_size: int, on_policy):
-        # self.in_queue = in_queue
-        # self.out_queue = out_queue
-        self.player_ids = player_ids
-        self.batch_size = batch_size
-        # self.states = {player_id: [] for player_id in self.player_ids}
-        # self.current_actors = {player_id: [] for player_id in self.player_ids}
-        # self.rewards = {player_id: [] for player_id in self.player_ids}
-        # self.actions = {player_id: [] for player_id in self.player_ids}
-        # self.sample_weights = {player_id: [] for player_id in self.player_ids}
-        self.num_samples = {player_id: 0 for player_id in player_ids}
-        self.samples = {player_id: [] for player_id in player_ids}
-        self.on_policy = on_policy
-
-    def add(self, player_id, hand_info_ref, num_samples):
-        self.num_samples[player_id] += num_samples
-        self.samples[player_id].append(hand_info_ref)
-        return self.can_train(player_id)
-
-    def can_train(self, player_id):
-        if self.num_samples[player_id] >= self.batch_size:
-            return True  # can train
-
-        return False
-
-    def get_batch(self, player_id):
-        assert self.num_samples[player_id] >= self.batch_size
-        samples = self.samples[player_id]
-        self.samples[player_id] = []
-        self.num_samples[player_id] = 0
-        # let the trainer handle extra data
-        return samples, self.num_samples[player_id]
 
 
 class JITTableScheduler:
@@ -294,95 +238,110 @@ class PlanTableScheduler:
 class CasinoManager:
     def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
                  bc_pretrained_model_path: str = None):
-        self.player_ids = list(range(NUM_PLAYERS))
-        self.device = device
-        self.save_folder = save_folder
-        os.makedirs(self.save_folder, exist_ok=True)
-        self.player_save_folder = os.path.join(save_folder, "players")
-        os.makedirs(self.player_save_folder, exist_ok=True)
-        self.log_folder = os.path.join(save_folder, "logs")
-        self.mode = "beta"
+        try:
+            self.player_ids = list(range(NUM_PLAYERS))
+            self.device = device
+            self.save_folder = save_folder
+            os.makedirs(self.save_folder, exist_ok=True)
+            self.player_save_folder = os.path.join(save_folder, "players")
+            os.makedirs(self.player_save_folder, exist_ok=True)
+            run_name = os.path.basename(save_folder)
+            self.log_folder = os.path.join(os.path.dirname(save_folder), "tb_logs", run_name)
+            os.makedirs(self.log_folder, exist_ok=True)
+            self.mode = "beta"
 
-        manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
-        self.writer = SummaryWriter(log_dir=manager_log_path)
-        self.timer = SemanticTimer()
-        self.loop_step = 0
+            manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
+            self.writer = SummaryWriter(log_dir=manager_log_path)
+            self.timer = SemanticTimer()
+            self.loop_step = 0
 
-        # player trackers
-        self.is_playing = {player_id: False for player_id in self.player_ids}
-        self.is_training = {player_id: False for player_id in self.player_ids}
-        self.is_playing_against = {player_id: [] for player_id in self.player_ids}
-        self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
-        self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
-        self.last_timeout_check = time.time()
+            # player trackers
+            self.is_playing = {player_id: False for player_id in self.player_ids}
+            self.is_training = {player_id: False for player_id in self.player_ids}
+            self.is_playing_against = {player_id: [] for player_id in self.player_ids}
+            self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
+            self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
+            self.last_timeout_check = time.time()
 
-        # we spin up the player models
-        self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
-                        self.player_ids]
-        if bc_pretrained_model_path is not None:
-            print(f"Loading pretrained model from {bc_pretrained_model_path}")
-            # load the model
-            param_dicts = torch.load(bc_pretrained_model_path, map_location=torch.device("cpu"), weights_only=True)
+            # we spin up the player models
+            if IS_RECURRENT:
+                self.players = [ray.put(RNNPlayerAI(RNNPPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                                self.player_ids]
+            else:
+                self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                                self.player_ids]
+            if bc_pretrained_model_path is not None:
+                print(f"Loading pretrained model from {bc_pretrained_model_path}")
+                # load the model
+                param_dicts = torch.load(bc_pretrained_model_path, map_location=torch.device("cpu"), weights_only=True)
 
-            loaded_players = []
-            for player in self.players:
-                player: PlayerAI = ray.get(player)
-                player.load_params(param_dicts)
-                loaded_players.append(ray.put(player))
+                loaded_players = []
+                for player in self.players:
+                    player: PlayerAI = ray.get(player)
+                    player.load_params(param_dicts)
+                    loaded_players.append(ray.put(player))
 
-            self.players = loaded_players
+                self.players = loaded_players
 
-        self.player_training_counts = [0] * len(self.player_ids)
+            self.player_training_counts = [0] * len(self.player_ids)
 
-        self.table_max_size = 2
-        self.table_min_size = 2
-        self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
-        self.on_policy = True
+            self.table_max_size = 2
+            self.table_min_size = 2
+            if IS_RECURRENT:
+                self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
+            else:
+                self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
+            self.on_policy = True
 
-        # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
-        self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+            # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
+            self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
-        self.table_send_queue = Queue(maxsize=0)
-        self.table_receive_queue = Queue(maxsize=0)
+            self.table_send_queue = Queue(maxsize=0)
+            self.table_receive_queue = Queue(maxsize=0)
 
-        self.trainer_send_queue = Queue(maxsize=0)
-        self.trainer_receive_queue = Queue(maxsize=0)
+            self.trainer_send_queue = Queue(maxsize=0)
+            self.trainer_receive_queue = Queue(maxsize=0)
 
-        # max_tables_needed = len(self.player_ids) // self.table_min_size
-        print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
-              f"{self.table_max_size}...")
-        self.table_ids = [table_id for table_id in range(NUM_TABLES)]
-        self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
-                                         self.table_max_size, discrete, self.mode,
-                                         self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
-        for table in self.tables:
-            table.start.remote()
+            # max_tables_needed = len(self.player_ids) // self.table_min_size
+            print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
+                  f"{self.table_max_size}...")
+            self.table_ids = [table_id for table_id in range(NUM_TABLES)]
+            TableActor = get_current_game_config()['table_actor']
+            self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
+                                             self.table_max_size, discrete, self.mode,
+                                             self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+            for table in self.tables:
+                table.start.remote()
 
-        self.data_storage = DataStorage(self.player_ids, self.batch_size, self.on_policy)
+            self.data_storage = DataStorage(self.player_ids, self.batch_size, self.log_folder)
 
-        self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
-        self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
-                                             self.log_folder, self.player_save_folder, self.mode)
-                         for i in self.trainer_ids]
-        for trainer in self.trainers:
-            trainer.start.remote()
+            self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
+            self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
+                                                 self.log_folder, self.player_save_folder, self.mode)
+                             for i in self.trainer_ids]
+            for trainer in self.trainers:
+                trainer.start.remote()
 
-        self.leaderboard_queue = Queue(maxsize=0)
-        # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
-        self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
-            self.leaderboard_queue, self.table_send_queue, self.table_receive_queue, self.trainer_send_queue,
-            self.trainer_receive_queue, self.player_ids, save_folder)
+            self.leaderboard_queue = Queue(maxsize=0)
+            # self.leaderboard = LeaderboardActor.remote(self.leaderboard_queue, self.player_ids, save_folder)
+            self.leaderboard = LeaderboardActor.options(name="GlobalLeaderboard", namespace="casino").remote(
+                self.leaderboard_queue, self.table_send_queue, self.table_receive_queue, self.trainer_send_queue,
+                self.trainer_receive_queue, self.player_ids, save_folder)
 
-        self.leaderboard.start.remote()
+            self.leaderboard.start.remote()
 
-        self.discrete = discrete
-        # min and max stack params are defined in terms of # of big blinds
-        self.min_stack = 100
-        self.max_stack = 100
-        self.min_bb_ratio = 2
-        self.max_bb_ratio = 2
-        self.min_allowed_start_bb = 10
-        self.stop_event = threading.Event()
+            self.discrete = discrete
+            # min and max stack params are defined in terms of # of big blinds
+            config = get_current_game_config()
+            self.min_stack = config["min_stack"]
+            self.max_stack = config["max_stack"]
+            self.min_bb_ratio = config["min_bb_ratio"]
+            self.max_bb_ratio = config["max_bb_ratio"]
+            self.min_allowed_start_bb = config["min_allowed_start_bb"]
+            self.stop_event = threading.Event()
+        except Exception as e:
+            traceback.print_exc()
+            raise e
 
     def rescue_ghost_players(self):
         """Periodically checks for players stuck in a playing or training state."""
@@ -555,6 +514,7 @@ class CasinoManager:
                     table_id += 1
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
+                TableActor = get_current_game_config()['table_actor']
                 new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
                                       self.table_max_size, self.discrete, self.mode, self.batch_size)
                 self.tables.append(new_table)
@@ -597,17 +557,18 @@ class CasinoManager:
                         activity_this_loop = True
                         table_size = len(list(player_ids))
 
+                        game_config = get_current_game_config()
+                        table_param_generator = game_config['table_param_generator']
                         small_blind = 1
                         big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
                         bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-                        starting_stacks = bb_starting_stacks * big_blind
-
-                        table_params = {
-                            "raw_blinds_or_straddles": (small_blind, big_blind),
-                            "min_bet": big_blind,
-                            "raw_starting_stacks": starting_stacks,
-                            "player_count": table_size
-                        }
+                        
+                        table_params = table_param_generator(
+                            table_size=table_size,
+                            small_blind=small_blind,
+                            big_blind=big_blind,
+                            bb_starting_stacks=bb_starting_stacks
+                        )
 
                         data = {
                             "type": "players",
@@ -657,18 +618,18 @@ class CasinoManager:
             while player_ids is not None:
                 table_size = len(list(player_ids))
                 # spin up a table
+                game_config = get_current_game_config()
+                table_param_generator = game_config['table_param_generator']
                 small_blind = 1
                 big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
-                # starting_stacks = random.randint(max(self.min_stack, big_blind * 10), max(self.max_stack, big_blind * 10))
                 bb_starting_stacks = random.randint(self.min_stack, self.max_stack)
-                starting_stacks = bb_starting_stacks * big_blind
-
-                table_params = {
-                    "raw_blinds_or_straddles": (small_blind, big_blind),
-                    "min_bet": big_blind,
-                    "raw_starting_stacks": starting_stacks,
-                    "player_count": table_size
-                }
+                
+                table_params = table_param_generator(
+                    table_size=table_size,
+                    small_blind=small_blind,
+                    big_blind=big_blind,
+                    bb_starting_stacks=bb_starting_stacks
+                )
                 # gather the player's parameters and send it all
                 data = {
                     "type": "players",

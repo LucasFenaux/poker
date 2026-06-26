@@ -4,10 +4,12 @@ import glob
 import pickle
 from queue import Empty
 from ray.util.queue import Queue
-from pokerkit import NoLimitTexasHoldem, Automation
+from pokerkit import Automation
+from src.game_registry import get_current_game_config
 from src.action_interpreter import to_exact_fraction, Action
 from src.state_interpreter import extract_state_snapshot
 from src.baseline_model import FastBaselineBot, get_valid_actions_dict
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 CHUNK_SIZE = 100
 
@@ -15,11 +17,9 @@ CHUNK_SIZE = 100
 @ray.remote(num_cpus=1)
 class Table:
     default_params = {
-        "ante_trimming_status": True,
-        "raw_antes": 0,
-        "raw_blinds_or_straddles": (1, 2),
-        "min_bet": 2,
-        "raw_starting_stacks": 200,   # 200 for 100 BB
+        "small_blind": 1,
+        "big_blind": 2,
+        "bb_starting_stacks": 100,
         "player_count": 2,
     }
     def __init__(self, table_id, queue: Queue, model_mode: str, num_players: int):
@@ -48,13 +48,34 @@ class Table:
     def reset(self, **table_params):
         self.params = table_params
         self.game_params = {**table_params}
-        starting_stacks = self.game_params.pop("raw_starting_stacks")
-        if isinstance(starting_stacks, int):
+        
+        # Determine actual starting stacks depending on how the game wants it
+        game_config = get_current_game_config()
+        self.table_param_generator = game_config['table_param_generator']
+        self.PokerkitGame = game_config['pokerkit_game']
+        self.pokerkit_automations = game_config['pokerkit_automations']
+        
+        self.actual_game_params = self.table_param_generator(
+            table_size=self.num_players,
+            small_blind=self.game_params["small_blind"],
+            big_blind=self.game_params["big_blind"],
+            bb_starting_stacks=self.game_params["bb_starting_stacks"]
+        )
+        
+        starting_stacks = self.actual_game_params.get("raw_starting_stacks")
+        if starting_stacks is None:
+            default_stack = self.game_params["bb_starting_stacks"] * self.game_params["big_blind"]
+            self.stacks = [default_stack] * self.num_players
+            self.starting_stacks = [default_stack] * self.num_players
+        elif isinstance(starting_stacks, (int, float)):
             self.stacks = [starting_stacks] * self.num_players
-            self.starting_stacks = [starting_stacks] * self.num_players  # will use it to compute game winnings
+            self.starting_stacks = [starting_stacks] * self.num_players
         else:
             self.stacks = starting_stacks
-            self.starting_stacks = starting_stacks[:]  # will use it to compute game winnings
+            self.starting_stacks = starting_stacks[:]
+        
+        if "raw_starting_stacks" in self.actual_game_params:
+            self.actual_game_params["raw_starting_stacks"] = self.starting_stacks[:]
         self.game_starting_stacks = self.starting_stacks[:]
         self.current_players = self.num_players
         self.num_games_played = 0
@@ -72,22 +93,15 @@ class Table:
 
     def _play_linear_round(self):
         try:
-            state = NoLimitTexasHoldem.create_state(
-                (
-                    Automation.ANTE_POSTING,
-                    Automation.BET_COLLECTION,
-                    Automation.BLIND_OR_STRADDLE_POSTING,
-                    Automation.CARD_BURNING,
-                    Automation.HOLE_DEALING,
-                    Automation.BOARD_DEALING,
-                    Automation.HOLE_CARDS_SHOWING_OR_MUCKING,
-                    Automation.HAND_KILLING,
-                    Automation.CHIPS_PUSHING,
-                    Automation.CHIPS_PULLING,
-                ),
-                raw_starting_stacks=self.game_starting_stacks,
-                **self.game_params
+            if "raw_starting_stacks" in self.actual_game_params:
+                self.actual_game_params["raw_starting_stacks"] = self.game_starting_stacks
+            state = self.PokerkitGame.create_state(
+                self.pokerkit_automations,
+                **self.actual_game_params
             )
+            
+            # Snap true initial stacks (Kuhn may override requested stacks to 2)
+            true_initial_stacks = list(state.stacks)
 
             while state.status:
                 current_actor: int = state.actor_index
@@ -120,20 +134,33 @@ class Table:
             # compute rewards
             final_game_stacks = state.stacks[:]
             busted_out = []
+            
+            blinds_or_straddles = self.actual_game_params.get("raw_blinds_or_straddles")
+            bb_amount = blinds_or_straddles[-1] if blinds_or_straddles else self.actual_game_params.get("min_bet", 1)
+            
             for i, (final_game_stack, game_starting_stack) in enumerate(zip(final_game_stacks,
-                                                                            self.game_starting_stacks)):
-                reward = (final_game_stack - game_starting_stack)/(self.game_params["raw_blinds_or_straddles"][-1])
+                                                                            true_initial_stacks)):
+                reward = float(final_game_stack - game_starting_stack)/float(bb_amount)
 
                 # save the hand info
                 hand_rewards = [reward] * len(self.game_states[i])
 
-                self.states.extend(self.game_states[i])
-                self.current_actors.extend(self.game_current_actors[i])
-                self.actions.extend(self.game_actions[i])
-                self.sample_weights.extend(self.game_sample_weights[i])
-                self.rewards.extend(hand_rewards)
+                if IS_RECURRENT:
+                    # Keep sequences intact for RNN
+                    self.states.append(self.game_states[i])
+                    self.current_actors.append(self.game_current_actors[i])
+                    self.actions.append(self.game_actions[i])
+                    self.sample_weights.append(self.game_sample_weights[i])
+                    self.rewards.append(hand_rewards)
+                else:
+                    # Flatten sequences for standard PPO (Original Code)
+                    self.states.extend(self.game_states[i])
+                    self.current_actors.extend(self.game_current_actors[i])
+                    self.actions.extend(self.game_actions[i])
+                    self.sample_weights.extend(self.game_sample_weights[i])
+                    self.rewards.extend(hand_rewards)
 
-                if final_game_stack < self.game_params["min_bet"]:
+                if final_game_stack < self.actual_game_params.get("min_bet", 1):
                     # player is busted out
                     # update game view to remove the busted out player
                     busted_out.append(i)
@@ -304,5 +331,6 @@ def generate_data(save_folder: str, num_games=100_000, num_workers=4, model_mode
 
 
 if __name__ == '__main__':
-    save_folder = "./data/"
-    generate_data(save_folder)
+    from src.ppo_self_play.global_settings import GAME_TYPE
+    save_folder = f"./data/{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}/"
+    generate_data(save_folder, num_workers=4)

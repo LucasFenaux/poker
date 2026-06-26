@@ -5,6 +5,7 @@ from datetime import datetime
 import uuid
 
 from src.ppo_self_play.casino_manager import CasinoManager
+from src.ppo_self_play.global_settings import IS_RECURRENT
 
 
 def get_save_folder(base_path="results"):
@@ -20,7 +21,8 @@ def get_save_folder(base_path="results"):
     unique_id = uuid.uuid4().hex[:8]
 
     # 3. Combine them
-    folder_name = f"run_{timestamp}_{unique_id}"
+    from src.ppo_self_play.global_settings import GAME_TYPE
+    folder_name = f"run_{GAME_TYPE}_{timestamp}_{unique_id}"
     full_path = os.path.join(base_path, folder_name)
 
     # 4. Create the folder safely
@@ -35,7 +37,8 @@ if __name__ == '__main__':
                  )
         device = torch.device("cpu")
         save_folder = get_save_folder()
-        bc_pretrained_model_path = "bc_pretrained_model_no_log.pt"
+        from src.ppo_self_play.global_settings import GAME_TYPE
+        bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
                                                bc_pretrained_model_path=bc_pretrained_model_path)
         manager.start()
