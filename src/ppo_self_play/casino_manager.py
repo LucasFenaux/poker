@@ -288,8 +288,11 @@ class CasinoManager:
             self.table_max_size = 2
             self.table_min_size = 2
             if IS_RECURRENT:
-                self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
+                # number of games
+                # self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
+                self.batch_size = 10 if RESOURCE_LIMITED else 80
             else:
+                # number of transitions
                 self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
             self.on_policy = True
 

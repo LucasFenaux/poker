@@ -1,6 +1,7 @@
 import importlib
 from pokerkit import NoLimitTexasHoldem, KuhnPoker, Automation
-from src.ppo_self_play.global_settings import GAME_TYPE
+from src.ppo_self_play.global_settings import GAME_TYPE, IS_RECURRENT
+
 
 def get_holdem_table_params(table_size, **kwargs):
     # kwargs can contain small_blind, big_blind, bb_starting_stacks
@@ -33,6 +34,7 @@ def get_kuhn_table_params(table_size, **kwargs):
 GAME_REGISTRY = {
     "HOLDEM": {
         "action_size": 2,
+        "num_decisions": 3,
         "min_stack": 100,
         "max_stack": 100,
         "min_bb_ratio": 2,
@@ -53,6 +55,7 @@ GAME_REGISTRY = {
     },
     "KUHN": {
         "action_size": 1,
+        "num_decisions": 2,
         "min_stack": 10,
         "max_stack": 10,
         "min_bb_ratio": 1,
@@ -73,6 +76,25 @@ GAME_REGISTRY = {
     }
 }
 
+
+HYPERPARAMETER_REGISTRY = {
+    "HOLDEM": {
+        False: {   # is recurrent
+        },
+        True: {
+        }
+    },
+    "KUHN": {
+        False: {  # is recurrent
+        },
+        True: {
+            "entropy_coef": 0.
+            # "lr": 1e-3,  # higher learning rate to boost learning
+            # "value_lr": 5e-3,   # adjusting the value lr accordingly
+        }
+    }
+}
+
 def get_class_from_path(path_str):
     module_path, class_name = path_str.rsplit('.', 1)
     module = importlib.import_module(module_path)
@@ -86,6 +108,7 @@ def get_current_game_config():
     
     return {
         "action_size": config["action_size"],
+        "num_decisions": config["num_decisions"],
         "action_interpreter": get_class_from_path(config["action_interpreter_path"]),
         "state_preprocessor": get_class_from_path(config["state_preprocessor_path"]),
         "state_interpreter": get_class_from_path(config["state_interpreter_path"]),
@@ -99,3 +122,11 @@ def get_current_game_config():
         "max_bb_ratio": config["max_bb_ratio"],
         "min_allowed_start_bb": config["min_allowed_start_bb"],
     }
+
+
+def get_current_game_hyperparameters():
+    if GAME_TYPE not in GAME_REGISTRY:
+        raise ValueError(f"Unknown GAME_TYPE: {GAME_TYPE}. Please define it in GAME_REGISTRY.")
+
+    hyperparameters = HYPERPARAMETER_REGISTRY[GAME_TYPE][IS_RECURRENT]
+    return hyperparameters
