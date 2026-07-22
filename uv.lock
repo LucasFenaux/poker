@@ -981,6 +981,19 @@ wheels = [
 ]
 
 [[package]]
+name = "ml-collections"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b8/f8/1a9ae6696dbb6bc9c44ddf5c5e84710d77fe9a35a57e8a06722e1836a4a6/ml_collections-1.1.0.tar.gz", hash = "sha256:0ac1ac6511b9f1566863e0bb0afad0c64e906ea278ad3f4d2144a55322671f6f", size = 61356, upload-time = "2025-04-17T08:25:02.247Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/8a/18d4ff2c7bd83f30d6924bd4ad97abf418488c3f908dea228d6f0961ad68/ml_collections-1.1.0-py3-none-any.whl", hash = "sha256:23b6fa4772aac1ae745a96044b925a5746145a70734f087eaca6626e92c05cbc", size = 76707, upload-time = "2025-04-17T08:24:59.038Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1337,6 +1350,33 @@ wheels = [
 ]
 
 [[package]]
+name = "open-spiel"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "attrs" },
+    { name = "ml-collections" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e1/40/5c0e66c3dbfc729047eaede515a578903c20528d7e8048e04bdd04b3e0fd/open_spiel-2.0.1.tar.gz", hash = "sha256:904fd9cd7244432c31f7b6345be29a065526e0f23778fc4712682bebe6ce43f3", size = 5631053, upload-time = "2026-07-17T00:47:36.696Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/9f/941cf1bd5aa5b21f1b7c55f96c74650d7b1154c40178efbec9bb0d73a702/open_spiel-2.0.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5619de3ae412c8ceff9375db8dcce2b362859f007715acbac55dc42c077fdf84", size = 12914632, upload-time = "2026-07-17T00:47:01.049Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/44/0920bb0426cda774936cd6424c571cb8121bc966698662d37526a15bfcba/open_spiel-2.0.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:51eb9b2fdff999fdeb19ce98997a9374530c77a770cb81e25aa78c183a84d132", size = 15254659, upload-time = "2026-07-17T00:47:03.427Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/f1/1e44eee3e59926ddbe897f904c6e5bf694c4c472e34b7c7115a400be7213/open_spiel-2.0.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4cda19d39990065ed20588477b5cec0309089612eea0d62dea724674b0e7ed00", size = 16048437, upload-time = "2026-07-17T00:47:05.468Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/aa/ef42cd3870b338033fa570aa99a1d3942171ff58dcaf4956523fa82593f9/open_spiel-2.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:4a5061abceea20efdb230139130035f7df3109e1da26d0ac5af217e34ad7435c", size = 10434822, upload-time = "2026-07-17T00:47:22.826Z" },
+    { url = "https://files.pythonhosted.org/packages/82/98/7f30c5e129a1e23bb5b72bf4ad73042920fe304e78e8e2baf7c8e7b0ef00/open_spiel-2.0.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6c7836cff80ab6a700e2dcc5b0cc61ec37c69a740e000d0640d2837784e13aaa", size = 12914746, upload-time = "2026-07-17T00:47:07.755Z" },
+    { url = "https://files.pythonhosted.org/packages/48/c2/f861e395899f8ccb4b594deed6a5a7d9a13fcd20bba57d7564f21b08b608/open_spiel-2.0.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:400cfd70950a172e17328012d387251660d184c0dff46c246cafd64aa69bd724", size = 15254510, upload-time = "2026-07-17T00:47:09.759Z" },
+    { url = "https://files.pythonhosted.org/packages/70/25/10a444a90471dd44061951b2deef5e955ba0989c8b285fc2d88f2fc37a1f/open_spiel-2.0.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:51c211d85a2d40d520c7580d0fef670b964a7374ef865496680da8895d7611c8", size = 16048552, upload-time = "2026-07-17T00:47:12.026Z" },
+    { url = "https://files.pythonhosted.org/packages/43/9a/aacdb9f77fcd1b990079de575be1d63b8d47e3b957d46597fd187a383f2b/open_spiel-2.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:94b3cb38a005146faff87baaa0f2520685c8ff80c237b1cc4687c9d5c003e350", size = 10434699, upload-time = "2026-07-17T00:47:31.812Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/0c/9459b20de6a8e191d4fd51f1695b8dee6865820c2857e1b86c5a2bf6bb1c/open_spiel-2.0.1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:51bcc802fb5b19029bb429e7dc3feebb37555a63e8353191bae0d1d5cf2a8cbf", size = 12431802, upload-time = "2026-07-17T00:47:14.247Z" },
+    { url = "https://files.pythonhosted.org/packages/84/42/8856de726d42249c9066679bf314425826b88308b0ed0bb10ca43e0a5d3d/open_spiel-2.0.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8f8d8ead391551e9c5557ed75a9779d1a780cf866cca7577990914245a3782b5", size = 15261622, upload-time = "2026-07-17T00:47:16.457Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/ab/22d1926afa727a474e9c440192d2fa51e1d474b3c46ba0b4ba98b0bc87aa/open_spiel-2.0.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3f695b6b4d437ef969c19b17b35e865397f7cb76c4614bce0c5868872c3534be", size = 16050646, upload-time = "2026-07-17T00:47:18.531Z" },
+    { url = "https://files.pythonhosted.org/packages/51/d2/37cafa0ab9b7e3024c97b44c0ea59eb686277ad3694097c09f6f4ff30dd8/open_spiel-2.0.1-cp314-cp314-win_amd64.whl", hash = "sha256:3d2d845e852641c67bcc5eef62fac21f7ee75bac892aa49d9b6db2f7a947a469", size = 10512514, upload-time = "2026-07-17T00:47:34.292Z" },
+]
+
+[[package]]
 name = "opencensus"
 version = "0.11.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1580,6 +1620,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "open-spiel" },
     { name = "pip" },
     { name = "pokerkit" },
     { name = "ray", extra = ["default"] },
@@ -1595,6 +1636,7 @@ dependencies = [
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.3" },
+    { name = "open-spiel", specifier = ">=2.0.1" },
     { name = "pip", specifier = ">=26.0.1" },
     { name = "pokerkit", specifier = ">=0.7.3" },
     { name = "ray", extras = ["default"], specifier = ">=2.54.0" },

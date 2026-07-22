@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
 from torch.distributions.beta import Beta
+from torch.distributions import Categorical
 import torch.nn.functional as F
 import pokerkit
+from torch.nn import ModuleList
 from src.ppo_self_play.global_settings import IS_RECURRENT
 from src.state_interpreter import StateSnapshot
 from src.game_registry import get_current_game_config
@@ -49,31 +51,50 @@ class PokerModel(nn.Module):
         )
         self.deterministic = deterministic
 
-        self.mu_net = None
-        self.std_net = None
-        self.alpha_net = None
-        self.beta_net = None
-        action_size = get_current_game_config()['action_size']
-        if self.mode == "normal":
-            self.mu_net = nn.Linear(64, action_size)
-            if not deterministic:
-                self.std_net = nn.Linear(64, action_size)
-        elif self.mode == "beta":
-            self.alpha_net = nn.Linear(64, action_size)
-            nn.init.constant_(self.alpha_net.bias, 1.0)
-            if not self.deterministic:
-                self.beta_net = nn.Linear(64, action_size)
-                nn.init.constant_(self.beta_net.bias, 1.0)
-        else:
-            raise NotImplementedError(self.mode)
+        self.bet_sizing_net = ModuleList()
+        self.use_bet_sizing_net = False
+
+        action_size = get_current_game_config()['action_size']  # whether there is betting size
+        assert action_size >= 1
+
+        num_decisions = get_current_game_config()['num_decisions']
+        # we assume the first action dim is always the action taken
+        self.action_net = nn.Linear(64, num_decisions)
+
+        if action_size > 1:
+            remaining_actions = action_size - 1
+
+            if self.mode == "normal":
+                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                if not deterministic:
+                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+            elif self.mode == "beta":
+                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
+                if not self.deterministic:
+                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
+            else:
+                raise NotImplementedError(self.mode)
+
+            self.use_bet_sizing_net = True
+
+    def _forward_action(self, feature_vector: torch.Tensor):
+        action = self.action_net(feature_vector)
+
+        if self.deterministic:
+            return action
+
+        dist = Categorical(logits=action)
+        return dist
 
     def _forward_beta(self, feature_vector: torch.Tensor):
         if self.deterministic:
-            return self.alpha_net(self.embed_net(feature_vector))
+            return self.bet_sizing_net[0](self.embed_net(feature_vector))
         else:
             feature_embedding = self.embed_net(feature_vector)
-            alpha = F.softplus(self.alpha_net(feature_embedding)) + 1e-5
-            beta = F.softplus(self.beta_net(feature_embedding)) + 1e-5
+            alpha = F.softplus(self.bet_sizing_net[0](feature_embedding)) + 1e-5
+            beta = F.softplus(self.bet_sizing_net[1](feature_embedding)) + 1e-5
             # alpha = torch.clamp(alpha, min=0.01, max=50.0)
             # beta = torch.clamp(beta, min=0.01, max=50.0)
             # alpha = torch.clamp(alpha, min=0.01, max=500.0)
@@ -83,11 +104,11 @@ class PokerModel(nn.Module):
 
     def _forward_normal(self, feature_vector: torch.Tensor):
         if self.deterministic:
-            return self.mu_net(self.embed_net(feature_vector))
+            return self.bet_sizing_net[0](self.embed_net(feature_vector))
         else:
             feature_embedding = self.embed_net(feature_vector)
-            mu = self.mu_net(feature_embedding)
-            std = F.softplus(self.std_net(feature_embedding)) + 1e-5
+            mu = self.bet_sizing_net[0](feature_embedding)
+            std = F.softplus(self.bet_sizing_net[1](feature_embedding)) + 1e-5
             dist = Normal(mu, std)
             return dist
 
@@ -116,12 +137,19 @@ class PokerModel(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported input types: {type(state)}, {type(current_actor)}")
 
-        if self.mode == "normal":
-            return self._forward_normal(feature_vector)
-        elif self.mode == "beta":
-            return self._forward_beta(feature_vector)
+        action_dist = self._forward_action(feature_vector)
+
+        if self.use_bet_sizing_net:
+            if self.mode == "normal":
+                bet_sizing_dist = self._forward_normal(feature_vector)
+            elif self.mode == "beta":
+                bet_sizing_dist = self._forward_beta(feature_vector)
+            else:
+                raise NotImplementedError
         else:
-            raise NotImplementedError
+            bet_sizing_dist = None
+
+        return action_dist, bet_sizing_dist
 
 
 class ValueModel(nn.Module):
@@ -182,43 +210,64 @@ class HierarchicalPokerModel(nn.Module):
 
         self.deterministic = deterministic
 
-        self.mu_net = None
-        self.std_net = None
-        self.alpha_net = None
-        self.beta_net = None
-        action_size = get_current_game_config()['action_size']
-        if self.mode == "normal":
-            self.mu_net = nn.Linear(64, action_size)
-            if not deterministic:
-                self.std_net = nn.Linear(64, action_size)
-        elif self.mode == "beta":
-            self.alpha_net = nn.Linear(64, action_size)
-            nn.init.constant_(self.alpha_net.bias, 1.0)
-            if not self.deterministic:
-                self.beta_net = nn.Linear(64, action_size)
-                nn.init.constant_(self.beta_net.bias, 1.0)
-        else:
-            raise NotImplementedError(self.mode)
+        self.bet_sizing_net = ModuleList()
+        self.use_bet_sizing_net = False
+
+        action_size = get_current_game_config()['action_size']  # whether there is betting size
+        assert action_size >= 1
+
+        num_decisions = get_current_game_config()['num_decisions']
+        # we assume the first action dim is always the action taken
+        self.action_net = nn.Linear(64, num_decisions)
+
+        if action_size > 1:
+            remaining_actions = action_size - 1
+
+            if self.mode == "normal":
+                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                if not deterministic:
+                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+            elif self.mode == "beta":
+                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
+                if not self.deterministic:
+                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
+            else:
+                raise NotImplementedError(self.mode)
+
+            self.use_bet_sizing_net = True
 
     def update_game_memory(self, final_hand_hidden: torch.Tensor, current_game_hidden: torch.Tensor):
         """Call this ONLY at the end of a hand to update the long-term session memory."""
         return self.game_gru(final_hand_hidden, current_game_hidden)
 
-    def _get_distribution(self, policy_features: torch.Tensor):
-        if self.mode == "beta":
-            if self.deterministic:
-                return self.alpha_net(policy_features)
-            alpha = F.softplus(self.alpha_net(policy_features)) + 1e-5
-            beta = F.softplus(self.beta_net(policy_features)) + 1e-5
-            alpha = torch.clamp(alpha, min=0.01, max=500.0)
-            beta = torch.clamp(beta, min=0.01, max=500.0)
-            return Beta(alpha, beta)
-        elif self.mode == "normal":
-            if self.deterministic:
-                return self.mu_net(policy_features)
-            mu = self.mu_net(policy_features)
-            std = F.softplus(self.std_net(policy_features)) + 1e-5
-            return Normal(mu, std)
+    def _forward_action(self, feature_vector: torch.Tensor):
+        action = self.action_net(feature_vector)
+
+        if self.deterministic:
+            return action
+
+        dist = Categorical(logits=action)
+        return dist
+
+    def _forward_beta(self, feature_vector: torch.Tensor):
+        if self.deterministic:
+            return self.bet_sizing_net[0](feature_vector)
+        else:
+            alpha = F.softplus(self.bet_sizing_net[0](feature_vector)) + 1e-5
+            beta = F.softplus(self.bet_sizing_net[1](feature_vector)) + 1e-5
+            dist = Beta(alpha, beta)
+            return dist
+
+    def _forward_normal(self, feature_vector: torch.Tensor):
+        if self.deterministic:
+            return self.bet_sizing_net[0](feature_vector)
+        else:
+            mu = self.bet_sizing_net[0](feature_vector)
+            std = F.softplus(self.bet_sizing_net[1](feature_vector)) + 1e-5
+            dist = Normal(mu, std)
+            return dist
 
     def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor, dict],
                 hand_hidden: torch.Tensor,
@@ -253,10 +302,20 @@ class HierarchicalPokerModel(nn.Module):
 
         combined = torch.cat([x, new_hand_hidden, game_hidden], dim=-1)
         policy_features = self.policy_mlp(combined)
-        dist = self._get_distribution(policy_features)
+        action_dist = self._forward_action(policy_features)
 
-        # RETURN TUPLE: The Distribution AND the new Hand State (to pass to the next step)
-        return dist, new_hand_hidden
+        if self.use_bet_sizing_net:
+            if self.mode == "normal":
+                bet_sizing_dist = self._forward_normal(policy_features)
+            elif self.mode == "beta":
+                bet_sizing_dist = self._forward_beta(policy_features)
+            else:
+                raise NotImplementedError
+        else:
+            bet_sizing_dist = None
+
+        # RETURN TUPLE: The Distributions AND the new Hand State (to pass to the next step)
+        return (action_dist, bet_sizing_dist), new_hand_hidden
 
 
 class HierarchicalValueModel(nn.Module):

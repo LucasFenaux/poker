@@ -49,6 +49,7 @@ class BaseTableActor:
         self.replay = 1  # not really necessary with tree game. Useful with linear game.
         self.linear_replay = 10
         self.tree_expansion = 3   # good options are 3, 4, 5
+        self.max_acceptable_game_length = 1000
         self.use_early_stopping = True
         self.batch_size = batch_size
         self.log_folder = log_folder
@@ -87,6 +88,7 @@ class BaseTableActor:
     def reset(self, players: list[Union[PlayerAI, RNNPlayerAI]], player_ids, **table_params):
         self.player_ids = player_ids
         self.game_player_ids = self.player_ids[:]
+        self.hands_since_last_action = {pid: 0 for pid in self.player_ids}
         players_params_list = [player.get_params() for player in players]
         self.trainable_players = players
         # if recurrent, we init the game and hand memories
@@ -163,6 +165,7 @@ class BaseTableActor:
     def _reset_current_hand(self):
         self.current_hand = {}
         for player_id in self.game_player_ids:  # only care about current players
+            self.hands_since_last_action[player_id] += 1
             self.current_hand[player_id] = {
                 "states": [],
                 "current_actors": [],
@@ -443,8 +446,8 @@ class BaseTableActor:
                     raise e
 
                 # we log the state and action for player training
-                is_new_hand = True if len(self.current_hand[player_id]["states"]) == 0 else False
-                self.current_hand[player_id]["new_hands"].append(is_new_hand)
+                self.current_hand[player_id]["new_hands"].append(self.hands_since_last_action[player_id])
+                self.hands_since_last_action[player_id] = 0
 
                 self.current_hand[player_id]["states"].append(snapshot)
                 self.current_hand[player_id]["current_actors"].append(current_actor)
@@ -561,7 +564,10 @@ class BaseTableActor:
                         # early stopping is useful with the timeout, as otherwise really long game could potentially timeout
                         early_stopping = False
                         for player_id in self.game_player_ids:
-                            if len(self.hand_info[player_id]["rewards"]) > self.batch_size:
+                            if not IS_RECURRENT and len(self.hand_info[player_id]["rewards"]) > min(self.batch_size, self.max_acceptable_game_length):
+                                done = True
+                                early_stopping = True
+                            elif IS_RECURRENT and len(self.hand_info[player_id]["rewards"]) > self.max_acceptable_game_length:   # batch size is in number of games
                                 done = True
                                 early_stopping = True
                         if early_stopping:
@@ -662,7 +668,8 @@ class BaseTableActor:
                         p_index = player_ids.index(pid)
                         p_version = self.current_player_versions[p_index]
                         if IS_RECURRENT:
-                            num_samples = sum([len(session_hand_info[pid]["states"][i]) for i in range(len(session_hand_info[pid]["states"]))])
+                            # num_samples = sum([len(session_hand_info[pid]["states"][i]) for i in range(len(session_hand_info[pid]["states"]))])
+                            num_samples = sum([1 for _ in range(len(session_hand_info[pid]["states"]))])
                         else:
                             num_samples = len(session_hand_info[pid]["states"])
 
@@ -823,8 +830,8 @@ class KuhnTableActor(BaseTableActor):
                         traceback.print_exc()
                     raise e
 
-                is_new_hand = True if len(self.current_hand[player_id]["states"]) == 0 else False
-                self.current_hand[player_id]["new_hands"].append(is_new_hand)
+                self.current_hand[player_id]["new_hands"].append(self.hands_since_last_action[player_id])
+                self.hands_since_last_action[player_id] = 0
 
                 self.current_hand[player_id]["states"].append(snapshot)
                 self.current_hand[player_id]["current_actors"].append(current_actor)

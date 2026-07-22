@@ -117,6 +117,11 @@ class PPO(OnPolicyAlgorithm):
         self.optimizer.load_state_dict(network_opt_params)
         self.value_optimizer.load_state_dict(value_opt_params)
 
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.lr
+        for param_group in self.value_optimizer.param_groups:
+            param_group['lr'] = self.value_lr
+
     def get_params(self):
         return [self.network.state_dict(), self.value_network.state_dict()]
 
@@ -162,14 +167,17 @@ class PPO(OnPolicyAlgorithm):
         states = (batched_states_dict,)
 
         if isinstance(batch_actions[0], torch.Tensor):
-            actions = torch.stack(batch_actions).to(self.device).to(torch.long if self.discrete else torch.float32)
+            actions = torch.stack(batch_actions).to(self.device).float()
         else:
             actions = torch.as_tensor(
                 np.array(batch_actions),
                 device=self.device,
-                dtype=torch.long if self.discrete else torch.float32,
+                dtype=torch.float32,
             )
-        safe_actions = torch.clamp(actions, min=1e-5, max=1.0 - 1e-5)
+        
+        safe_actions = actions.clone()
+        if safe_actions.shape[-1] > 1 and safe_actions.dim() > 1:
+            safe_actions[..., 1:] = torch.clamp(safe_actions[..., 1:], min=1e-5, max=1.0 - 1e-5)
 
         if batch_rnn_states is not None:
             new_hs = []
@@ -191,16 +199,14 @@ class PPO(OnPolicyAlgorithm):
         # batch_rewards = sign * torch.log(batch_rewards.abs() + 1)
 
         with torch.no_grad():
-            dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
-            if not self.discrete:
-                logp_all = dist_old.log_prob(safe_actions)
-                is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                if logp_all.shape[-1] > 1:
-                    logp_old = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-                else:
-                    logp_old = logp_all[:, 0]
+            action_dist_old, bet_sizing_dist_old = self.get_model_policy(self.network, states, batch_rnn_states)
+            if bet_sizing_dist_old is not None:
+                logp_old = action_dist_old.log_prob(safe_actions[..., 0].long())
+                logp_bet_old = bet_sizing_dist_old.log_prob(safe_actions[..., 1])
+                is_raise = (safe_actions[..., 0].long() == Action.RAISE.value).float()
+                logp_old = logp_old + (logp_bet_old * is_raise)
             else:
-                logp_old = dist_old.log_prob(safe_actions)
+                logp_old = action_dist_old.log_prob(safe_actions.long())
 
             value_function = self.value_network(*states).squeeze(-1)
             advantages = batch_rewards - value_function.clone().detach()
@@ -254,21 +260,18 @@ class PPO(OnPolicyAlgorithm):
                 self.value_optimizer.step()
 
                 self.optimizer.zero_grad()
-                dist = self.get_model_policy(self.network, mini_batch_states, mini_batch_rnn_states)
+                action_dist, bet_sizing_dist = self.get_model_policy(self.network, mini_batch_states, mini_batch_rnn_states)
 
-                if not self.discrete:
-                    logp_all = dist.log_prob(mini_batch_safe_actions)
-                    is_raise = (mini_batch_safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                    entropy_all = dist.entropy()
-                    if logp_all.shape[-1] > 1:
-                        logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-                        entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
-                    else:
-                        logp = logp_all[:, 0]
-                        entropy = entropy_all[:, 0]
+                entropy = action_dist.entropy()
+                if bet_sizing_dist is not None:
+                    logp = action_dist.log_prob(mini_batch_safe_actions[..., 0].long())
+                    logp_bet = bet_sizing_dist.log_prob(mini_batch_safe_actions[..., 1])
+                    entropy_bet = bet_sizing_dist.entropy()
+                    is_raise = (mini_batch_safe_actions[..., 0].long() == Action.RAISE.value).float()
+                    logp = logp + (logp_bet * is_raise)
+                    entropy = entropy + (entropy_bet * is_raise)
                 else:
-                    logp = dist.log_prob(mini_batch_safe_actions)
-                    entropy = dist.entropy()
+                    logp = action_dist.log_prob(mini_batch_safe_actions.long())
 
                 with torch.no_grad():
                     logratio = logp - mini_batch_logp_old
@@ -314,25 +317,29 @@ class PPO(OnPolicyAlgorithm):
             entropy_loss = avg_e_loss
 
         with torch.no_grad():
-            dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            samples = dist.sample((1000,))
-            action_hist = samples[..., 0]
-            if samples.shape[-1] > 1:
-                betting_size = samples[..., 1]
+            action_dist, bet_sizing_dist = self.get_model_policy(self.network, states, batch_rnn_states)
+            action_samples = action_dist.sample((1000,))
+            action_hist = action_samples.float()
+            
+            if bet_sizing_dist is not None:
+                betting_size = bet_sizing_dist.sample((1000,))
             else:
                 betting_size = torch.zeros_like(action_hist)
+                
             alpha_tensor = None
             beta_tensor = None
-            if self.mode == "normal":
-                action_hist = torch.sigmoid(action_hist)
+            if self.mode == "normal" and bet_sizing_dist is not None:
                 betting_size = torch.sigmoid(betting_size)
-            elif self.mode == "beta":
-                alpha_tensor = dist.concentration1[0]
-                beta_tensor = dist.concentration0[0]
+            elif self.mode == "beta" and bet_sizing_dist is not None:
+                alpha_tensor = bet_sizing_dist.concentration1[0]
+                beta_tensor = bet_sizing_dist.concentration0[0]
+
+            trip_kl = torch.distributions.kl.kl_divergence(action_dist_old, action_dist).mean().item()
 
         return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
                 "action_hist": action_hist, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor,
-                "betting_size": betting_size, "rewards": batch_rewards}
+                "betting_size": betting_size, "rewards": batch_rewards, "update_count": count,
+                "trip_kl": trip_kl}
 
     def full_batch_update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
@@ -422,21 +429,18 @@ class PPO(OnPolicyAlgorithm):
             self.value_optimizer.step()
 
             self.optimizer.zero_grad()
-            dist = self.get_model_policy(self.network, states, batch_rnn_states)
+            action_dist, bet_sizing_dist = self.get_model_policy(self.network, states, batch_rnn_states)
 
-            if not self.discrete:
-                logp_all = dist.log_prob(safe_actions)
-                is_raise = (safe_actions[:, 0] >= Action.get_raise_threshold()).float()
-                entropy_all = dist.entropy()
-                if logp_all.shape[-1] > 1:
-                    logp = logp_all[:, 0] + (logp_all[:, 1] * is_raise)
-                    entropy = entropy_all[:, 0] + (entropy_all[:, 1] * is_raise)
-                else:
-                    logp = logp_all[:, 0]
-                    entropy = entropy_all[:, 0]
+            entropy = action_dist.entropy()
+            if bet_sizing_dist is not None:
+                logp = action_dist.log_prob(safe_actions[..., 0].long())
+                logp_bet = bet_sizing_dist.log_prob(safe_actions[..., 1])
+                entropy_bet = bet_sizing_dist.entropy()
+                is_raise = (safe_actions[..., 0].long() == Action.RAISE.value).float()
+                logp = logp + (logp_bet * is_raise)
+                entropy = entropy + (entropy_bet * is_raise)
             else:
-                logp = dist.log_prob(safe_actions)
-                entropy = dist.entropy()
+                logp = action_dist.log_prob(safe_actions.long())
 
             with torch.no_grad():
                 logratio = logp - logp_old
@@ -481,36 +485,46 @@ class PPO(OnPolicyAlgorithm):
             entropy_loss = avg_e_loss
 
         with torch.no_grad():
-            dist = self.get_model_policy(self.network, states, batch_rnn_states)
-            samples = dist.sample((1000,))
-            action_hist = samples[..., 0]
-            if samples.shape[-1] > 1:
-                betting_size = samples[..., 1]
+            action_dist, bet_sizing_dist = self.get_model_policy(self.network, states, batch_rnn_states)
+            action_samples = action_dist.sample((1000,))
+            action_hist = action_samples.float()
+            
+            if bet_sizing_dist is not None:
+                betting_size = bet_sizing_dist.sample((1000,))
             else:
                 betting_size = torch.zeros_like(action_hist)
+                
             alpha_tensor = None
             beta_tensor = None
-            if self.mode == "normal":
-                action_hist = torch.sigmoid(action_hist)
+            if self.mode == "normal" and bet_sizing_dist is not None:
                 betting_size = torch.sigmoid(betting_size)
-            elif self.mode == "beta":
-                alpha_tensor = dist.concentration1[0]
-                beta_tensor = dist.concentration0[0]
+            elif self.mode == "beta" and bet_sizing_dist is not None:
+                alpha_tensor = bet_sizing_dist.concentration1[0]
+                beta_tensor = bet_sizing_dist.concentration0[0]
 
         return {"loss": loss, "value_loss": value_loss, "policy_loss": policy_loss, "entropy_loss": entropy_loss,
                 "action_hist": action_hist, "alpha_hist": alpha_tensor, "beta_hist": beta_tensor,
-                "betting_size": betting_size, "rewards": batch_rewards}
+                "betting_size": betting_size, "rewards": batch_rewards, "update_count": count}
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
+        with torch.no_grad():
+            initial_weights = torch.cat([p.view(-1) for p in self.network.parameters() if p.requires_grad]).clone()
+
         if self.update_mode == "full_batch":
-            return self.full_batch_update(batch_states, batch_rewards, batch_actions, batch_rnn_states, sample_weights,
+            metrics = self.full_batch_update(batch_states, batch_rewards, batch_actions, batch_rnn_states, sample_weights,
                                           *args, **kwargs)
         elif self.update_mode == "mini_batch":
-            return self.mini_batch_update(batch_states, batch_rewards, batch_actions, batch_rnn_states, sample_weights,
+            metrics = self.mini_batch_update(batch_states, batch_rewards, batch_actions, batch_rnn_states, sample_weights,
                                           *args, **kwargs)
         else:
             raise ValueError(f"Unknown update mode: {self.update_mode}")
+
+        with torch.no_grad():
+            final_weights = torch.cat([p.view(-1) for p in self.network.parameters() if p.requires_grad])
+            metrics["weight_l2_change"] = torch.norm(final_weights - initial_weights).item()
+
+        return metrics
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
         policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)
@@ -574,8 +588,12 @@ class PPOInferenceWrapper:
         return tensor_dict
 
     def get_action(self, state: (pokerkit.State, int), rnn_state = None):
-        policy = self.get_model_policy(self.network, state, rnn_state=rnn_state)
-        return policy.sample().cpu().squeeze(0)
+        action_dist, bet_sizing_dist = self.get_model_policy(self.network, state, rnn_state=rnn_state)
+        action = action_dist.sample().cpu()
+        if bet_sizing_dist is not None:
+            bet_size = bet_sizing_dist.sample().cpu()
+            return torch.stack([action, bet_size], dim=-1).squeeze(0)
+        return action.squeeze(0)
 
     def get_model_policy(self, network, state, rnn_state = None) -> Union[Categorical, Normal]:
         if isinstance(state, tuple) and len(state) == 2 and not isinstance(state[0], dict):
@@ -585,13 +603,8 @@ class PPOInferenceWrapper:
         else:
             state_args = state
 
-        if self.discrete:
-            logits = network(*state_args)
-            dist: Categorical = Categorical(logits)
-            return dist
-        else:
-            dist: Normal = network(*state_args)
-            return dist
+        action_dist, bet_sizing_dist = network(*state_args)
+        return action_dist, bet_sizing_dist
 
 
 class RNNPPOInferenceWrapper(PPOInferenceWrapper):
@@ -621,9 +634,14 @@ class RNNPPOInferenceWrapper(PPOInferenceWrapper):
 
     def get_action(self, state: tuple[pokerkit.State, int], hand_hidden: torch.Tensor = None,
                    game_hidden: torch.Tensor = None):
-        policy, new_hand_hidden = self.get_model_policy(self.network, state, hand_hidden=hand_hidden,
+        (action_dist, bet_sizing_dist), new_hand_hidden = self.get_model_policy(self.network, state, hand_hidden=hand_hidden,
                                                         game_hidden=game_hidden)
-        action_tensor = policy.sample().cpu().squeeze(0)
+        action = action_dist.sample().cpu()
+        if bet_sizing_dist is not None:
+            bet_size = bet_sizing_dist.sample().cpu()
+            action_tensor = torch.stack([action, bet_size], dim=-1).squeeze(0)
+        else:
+            action_tensor = action.squeeze(0)
         # Detach and send memory to CPU so the TableActor doesn't hoard GPU RAM
         return action_tensor, new_hand_hidden.detach().cpu()
 
@@ -648,26 +666,21 @@ class RNNPPOInferenceWrapper(PPOInferenceWrapper):
             game_hidden = game_hidden.to(self.device)
 
         # Retrieve logits/distribution alongside the updated RNN memory
-        if self.discrete:
-            logits, new_hand_hidden = network(*state_args, hand_hidden=hand_hidden, game_hidden=game_hidden)
-            dist: Categorical = Categorical(logits)
-            return dist, new_hand_hidden
-        else:
-            dist, new_hand_hidden = network(*state_args, hand_hidden=hand_hidden, game_hidden=game_hidden)
-            return dist, new_hand_hidden
+        (action_dist, bet_sizing_dist), new_hand_hidden = network(*state_args, hand_hidden=hand_hidden, game_hidden=game_hidden)
+        return (action_dist, bet_sizing_dist), new_hand_hidden
 
 
 class RNNPPO(PPO):
     default_hyperparameters = {
         "sgd_steps": 5,
-        "base_batch_size": 500,
-        "mini_batch_size": 500,
+        "base_batch_size": 500, 
+        "mini_batch_size": 10,  # number of games in one mini batch
         "clip_threshold": 0.2,
         "target_kl": 0.01,
         "lr": 1e-4,
         "value_lr": 5e-4,
         "reward_normalization_scaler": 1,
-        "entropy_coef": 5e-3,
+        "entropy_coef": 1e-4,
         "grad_clip_norm": 0.5,
         "update_mode": "mini_batch"
     }
@@ -724,41 +737,52 @@ class RNNPPO(PPO):
         g = g_0
 
         for t in range(max_seq_len):
-            is_new_hand = new_hand_mask[:, t].unsqueeze(1)  # Shape: (batch_size, 1)
+            elapsed_hands = new_hand_mask[:, t]
+            max_elapsed = int(elapsed_hands.max().item())
 
-            # If a new hand is starting (and it's not the absolute start of the game),
-            # update the game memory using the previous hand's final state
-            if t > 0:
-                updated_g = self.network.update_game_memory(h, g)
-                g = torch.where(is_new_hand, updated_g, g)
+            if max_elapsed > 0:
+                if t > 0:
+                    mask = (elapsed_hands >= 1).unsqueeze(1)
+                    updated_g = self.network.update_game_memory(h, g)
+                    g = torch.where(mask, updated_g, g)
+                
+                if max_elapsed > 1:
+                    zeros_h = torch.zeros_like(h)
+                    for elapsed in range(2, max_elapsed + 1):
+                        mask = (elapsed_hands >= elapsed).unsqueeze(1)
+                        updated_g = self.network.update_game_memory(zeros_h, g)
+                        g = torch.where(mask, updated_g, g)
 
-            # Reset hand memory to zeros where a new hand is starting
-            h = torch.where(is_new_hand, torch.zeros_like(h), h)
+            h = torch.where((elapsed_hands >= 1).unsqueeze(1), torch.zeros_like(h), h)
 
             step_dict = {k: v[:, t] for k, v in states_dict.items()}
 
-            if self.discrete:
-                logits, h = self.network(step_dict, hand_hidden=h, game_hidden=g)
-                all_dist_params.append(logits)
-            else:
-                dist, h = self.network(step_dict, hand_hidden=h, game_hidden=g)
+            (action_dist, bet_sizing_dist), h = self.network(step_dict, hand_hidden=h, game_hidden=g)
+            
+            action_logits = action_dist.logits
+            bet_params = None
+            if bet_sizing_dist is not None:
                 if self.mode == "normal":
-                    all_dist_params.append((dist.loc, dist.scale))
+                    bet_params = (bet_sizing_dist.loc, bet_sizing_dist.scale)
                 elif self.mode == "beta":
-                    all_dist_params.append((dist.concentration1, dist.concentration0))
+                    bet_params = (bet_sizing_dist.concentration1, bet_sizing_dist.concentration0)
+            all_dist_params.append((action_logits, bet_params))
 
-        if self.discrete:
-            stacked_logits = torch.stack(all_dist_params, dim=1)
-            return Categorical(logits=stacked_logits)
-        else:
+        stacked_action_logits = torch.stack([p[0] for p in all_dist_params], dim=1)
+        action_dist = Categorical(logits=stacked_action_logits)
+        
+        bet_sizing_dist = None
+        if all_dist_params[0][1] is not None:
             if self.mode == "normal":
-                mu = torch.stack([p[0] for p in all_dist_params], dim=1)
-                std = torch.stack([p[1] for p in all_dist_params], dim=1)
-                return Normal(mu, std)
+                mu = torch.stack([p[1][0] for p in all_dist_params], dim=1)
+                std = torch.stack([p[1][1] for p in all_dist_params], dim=1)
+                bet_sizing_dist = Normal(mu, std)
             elif self.mode == "beta":
-                alpha = torch.stack([p[0] for p in all_dist_params], dim=1)
-                beta = torch.stack([p[1] for p in all_dist_params], dim=1)
-                return Beta(alpha, beta)
+                alpha = torch.stack([p[1][0] for p in all_dist_params], dim=1)
+                beta = torch.stack([p[1][1] for p in all_dist_params], dim=1)
+                bet_sizing_dist = Beta(alpha, beta)
+        
+        return action_dist, bet_sizing_dist
 
     def _unroll_value(self, states_dict, h_0, g_0, new_hand_mask):
         max_seq_len = next(iter(states_dict.values())).size(1)
@@ -767,13 +791,23 @@ class RNNPPO(PPO):
         g = g_0
 
         for t in range(max_seq_len):
-            is_new_hand = new_hand_mask[:, t].unsqueeze(1)
+            elapsed_hands = new_hand_mask[:, t]
+            max_elapsed = int(elapsed_hands.max().item())
 
-            if t > 0:
-                updated_g = self.value_network.update_game_memory(h, g)
-                g = torch.where(is_new_hand, updated_g, g)
+            if max_elapsed > 0:
+                if t > 0:
+                    mask = (elapsed_hands >= 1).unsqueeze(1)
+                    updated_g = self.value_network.update_game_memory(h, g)
+                    g = torch.where(mask, updated_g, g)
+                
+                if max_elapsed > 1:
+                    zeros_h = torch.zeros_like(h)
+                    for elapsed in range(2, max_elapsed + 1):
+                        mask = (elapsed_hands >= elapsed).unsqueeze(1)
+                        updated_g = self.value_network.update_game_memory(zeros_h, g)
+                        g = torch.where(mask, updated_g, g)
 
-            h = torch.where(is_new_hand, torch.zeros_like(h), h)
+            h = torch.where((elapsed_hands >= 1).unsqueeze(1), torch.zeros_like(h), h)
 
             step_dict = {k: v[:, t] for k, v in states_dict.items()}
             val, h = self.value_network(step_dict, hand_hidden=h, game_hidden=g)
@@ -789,34 +823,35 @@ class RNNPPO(PPO):
         batched_states_dict, mask = self.preprocess_sequence_batch(nested_states, nested_actors)
 
         padded_actions = pad_sequence(
-            [torch.stack(a).to(dtype=torch.long if self.discrete else torch.float32, device=self.device) for a in
+            [torch.stack(a).to(dtype=torch.float32, device=self.device) for a in
              batch_actions], batch_first=True)
-        safe_actions = torch.clamp(padded_actions, min=1e-5, max=1.0 - 1e-5)
+             
+        safe_actions = padded_actions.clone()
+        if safe_actions.shape[-1] > 1 and safe_actions.dim() > 2:
+            safe_actions[..., 1:] = torch.clamp(safe_actions[..., 1:], min=1e-2, max=1.0 - 1e-2)
 
         padded_rewards = pad_sequence([torch.tensor(r, dtype=torch.float32, device=self.device) for r in batch_rewards],
                                       batch_first=True)
 
         nested_new_hands = kwargs.get("new_hands", [])
         padded_new_hands = pad_sequence(
-            [torch.tensor(nh, dtype=torch.bool, device=self.device) for nh in nested_new_hands],
-            batch_first=True, padding_value=False)
+            [torch.tensor(nh, dtype=torch.long, device=self.device) for nh in nested_new_hands],
+            batch_first=True, padding_value=0)
 
         # Initialize Base Memory for GRU
         h_0 = torch.zeros(num_sequences, self.network.hand_memory_size, device=self.device)
         g_0 = torch.zeros(num_sequences, self.network.game_memory_size, device=self.device)
 
         with torch.no_grad():
-            dist_old = self._unroll_policy(batched_states_dict, h_0, g_0, padded_new_hands)
+            action_dist_old, bet_sizing_dist_old = self._unroll_policy(batched_states_dict, h_0, g_0, padded_new_hands)
 
-            if not self.discrete:
-                logp_all = dist_old.log_prob(safe_actions)
-                is_raise = (safe_actions[:, :, 0] >= Action.get_raise_threshold()).float()
-                if logp_all.shape[-1] > 1:
-                    logp_old = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
-                else:
-                    logp_old = logp_all[:, :, 0]
+            if bet_sizing_dist_old is not None:
+                logp_old = action_dist_old.log_prob(safe_actions[..., 0].long())
+                logp_bet_old = bet_sizing_dist_old.log_prob(safe_actions[..., 1])
+                is_raise = (safe_actions[..., 0].long() == Action.RAISE.value).float()
+                logp_old = logp_old + (logp_bet_old * is_raise)
             else:
-                logp_old = dist_old.log_prob(safe_actions)
+                logp_old = action_dist_old.log_prob(safe_actions.long())
 
             value_function = self._unroll_value(batched_states_dict, h_0, g_0, padded_new_hands).squeeze(-1)
             advantages = padded_rewards - value_function.clone().detach()
@@ -858,29 +893,31 @@ class RNNPPO(PPO):
 
                 # ---- Policy Update ----
                 self.optimizer.zero_grad()
-                dist = self._unroll_policy(mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
+                action_dist, bet_sizing_dist = self._unroll_policy(mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
 
-                if not self.discrete:
-                    logp_all = dist.log_prob(mb_safe_actions)
-                    is_raise = (mb_safe_actions[:, :, 0] >= Action.get_raise_threshold()).float()
-                    entropy_all = dist.entropy()
-                    if logp_all.shape[-1] > 1:
-                        logp = logp_all[:, :, 0] + (logp_all[:, :, 1] * is_raise)
-                        entropy = entropy_all[:, :, 0] + (entropy_all[:, :, 1] * is_raise)
-                    else:
-                        logp = logp_all[:, :, 0]
-                        entropy = entropy_all[:, :, 0]
+                entropy = action_dist.entropy()
+                if bet_sizing_dist is not None:
+                    logp = action_dist.log_prob(mb_safe_actions[..., 0].long())
+                    logp_bet = bet_sizing_dist.log_prob(mb_safe_actions[..., 1])
+                    entropy_bet = bet_sizing_dist.entropy()
+                    is_raise = (mb_safe_actions[..., 0].long() == Action.RAISE.value).float()
+                    logp = logp + (logp_bet * is_raise)
+                    entropy = entropy + (entropy_bet * is_raise)
                 else:
-                    logp = dist.log_prob(mb_safe_actions)
-                    entropy = dist.entropy()
+                    logp = action_dist.log_prob(mb_safe_actions.long())
 
                 with torch.no_grad():
-                    logratio = logp - mb_logp_old
-                    ratio = torch.exp(logratio)
-                    approx_kl = (((ratio - 1) - logratio) * mb_mask).sum() / mb_mask.sum()
+                    logratio_no_grad = logp - mb_logp_old
+                    ratio_no_grad = torch.exp(logratio_no_grad)
+                    approx_kl = (((ratio_no_grad - 1) - logratio_no_grad) * mb_mask).sum() / mb_mask.sum()
 
                 if approx_kl.item() > 1.5 * self.target_kl:
+                    print(f"KL early stopping triggered! KL: {approx_kl.item():.4f} > {1.5 * self.target_kl:.4f} at epoch {i}, start_idx {start_idx}")
                     break
+
+                # MUST compute ratio outside torch.no_grad() for gradients to flow!
+                logratio = logp - mb_logp_old
+                ratio = torch.exp(logratio)
 
                 surr1 = ratio * mb_advantages
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_threshold, 1.0 + self.clip_threshold) * mb_advantages
@@ -892,13 +929,16 @@ class RNNPPO(PPO):
                 loss = policy_loss - (self.entropy_coef * entropy_loss)
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
                 self.optimizer.step()
 
                 avg_v_loss += value_loss.item()
                 avg_loss += loss.item()
                 avg_p_loss += policy_loss.item()
                 avg_e_loss += entropy_loss.item()
+                if "grad_norm" not in kwargs:
+                    kwargs["grad_norm"] = 0.0
+                kwargs["grad_norm"] += grad_norm.item()
                 count += 1
 
         final_loss = avg_loss / count if count != 0 else avg_loss
@@ -907,24 +947,31 @@ class RNNPPO(PPO):
         final_entropy_loss = avg_e_loss / count if count != 0 else avg_e_loss
 
         with torch.no_grad():
-            dist = self._unroll_policy(batched_states_dict, h_0, g_0, padded_new_hands)
-            samples = dist.sample((1000,))
-            action_hist = samples[..., 0]
-            if samples.shape[-1] > 1:
-                betting_size = samples[..., 1]
+            action_dist, bet_sizing_dist = self._unroll_policy(batched_states_dict, h_0, g_0, padded_new_hands)
+            action_samples = action_dist.sample((1000,))
+            action_hist = action_samples.float()
+            
+            if bet_sizing_dist is not None:
+                betting_size = bet_sizing_dist.sample((1000,))
             else:
                 betting_size = torch.zeros_like(action_hist)
+                
             alpha_tensor = beta_tensor = None
 
-            if self.mode == "normal":
-                action_hist = torch.sigmoid(action_hist)
+            if self.mode == "normal" and bet_sizing_dist is not None:
                 betting_size = torch.sigmoid(betting_size)
-            elif self.mode == "beta":
-                alpha_tensor = dist.concentration1[0]
-                beta_tensor = dist.concentration0[0]
+            elif self.mode == "beta" and bet_sizing_dist is not None:
+                alpha_tensor = bet_sizing_dist.concentration1[0]
+                beta_tensor = bet_sizing_dist.concentration0[0]
+
+            trip_kl = torch.distributions.kl.kl_divergence(action_dist_old, action_dist)
+            trip_kl = (trip_kl * mask).sum() / mask.sum()
+            trip_kl = trip_kl.item()
 
         valid_rewards = padded_rewards[mask]
 
         return {"loss": final_loss, "value_loss": final_value_loss, "policy_loss": final_policy_loss,
                 "entropy_loss": final_entropy_loss, "action_hist": action_hist, "alpha_hist": alpha_tensor,
-                "beta_hist": beta_tensor, "betting_size": betting_size, "rewards": valid_rewards}
+                "beta_hist": beta_tensor, "betting_size": betting_size, "rewards": valid_rewards, "update_count": count,
+                "grad_norm": kwargs.get("grad_norm", 0.0) / count if count > 0 else 0.0,
+                "trip_kl": trip_kl}

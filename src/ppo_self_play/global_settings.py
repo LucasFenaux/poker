@@ -31,7 +31,7 @@ elif GAME_TYPE=="KUHN":
     MAX_TABLE_SIZE=2
     NUM_PLAYERS=50
     NUM_TABLES=30
-    NUM_TRAINERS=30
+    NUM_TRAINERS=50
     RESOURCE_LIMITED=False
 else:
     raise NotImplementedError

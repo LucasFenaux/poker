@@ -38,7 +38,10 @@ if __name__ == '__main__':
         device = torch.device("cpu")
         save_folder = get_save_folder()
         from src.ppo_self_play.global_settings import GAME_TYPE
-        bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
+        if GAME_TYPE == "KUHN":
+            bc_pretrained_model_path = None
+        else:
+            bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
                                                bc_pretrained_model_path=bc_pretrained_model_path)
         manager.start()
