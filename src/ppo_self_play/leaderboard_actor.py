@@ -64,7 +64,7 @@ class LeaderboardActor:
                 if data is not None:
                     # print("updating")
                     (player_id, player_winnings, num_tables, num_trainers, is_playing, is_training, is_playing_against,
-                     player_dispatch_times) = data
+                     player_dispatch_times, historical_players_used, num_historical_checkpoints) = data
                     self.num_tables = num_tables
                     self.num_trainers = num_trainers
                     self.is_playing = is_playing

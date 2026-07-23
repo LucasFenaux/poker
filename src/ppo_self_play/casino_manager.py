@@ -7,232 +7,17 @@ import ray
 from ray.util.queue import Queue, Empty
 import os
 import torch
-import numpy as np
 
-from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, MAX_TABLE_SIZE, RESOURCE_LIMITED, IS_RECURRENT
+from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT
 from src.ppo_self_play.alg import PPO, RNNPPO
 from src.ppo_self_play.trainer_actor import TrainerActor
 from src.game_registry import get_current_game_config
 from src.ppo_self_play.leaderboard_actor import LeaderboardActor
 from src.ppo_self_play.data_storage import DataStorage
 from src.player_ai import PlayerAI, RNNPlayerAI
-import math
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
-
-
-class JITTableScheduler:
-    def __init__(self, table_min_size: int, table_max_size: int, player_ids):
-        self.player_ids = player_ids
-        self.table_max_size = table_max_size
-        self.table_min_size = table_min_size
-        assert table_max_size <= MAX_TABLE_SIZE
-        assert self.table_min_size <= self.table_max_size
-        # self.max_plans = 10
-        self.min_pool = max(table_max_size * 2, int(len(self.player_ids)/10))
-        self.weights = {
-            player_id: {
-                other_player_id: 0 for other_player_id in player_ids if player_id != other_player_id
-            } for player_id in player_ids
-        }
-        self.pool = set(self.player_ids[:])
-
-    def update_weights(self, player_id: int, other_players: list[tuple[int, int]]):
-        if other_players is not None:
-            player_weights = self.weights[player_id]
-            for other_player, other_player_version in other_players:
-                if other_player != player_id:
-                    player_weights[other_player] += other_player_version
-
-    def add(self, player_id: int):
-        """
-        Add a player into the scheduler to be scheduled for a game
-        :param player_id: Which player we are adding back in.
-        :param other_players:  The other players the player was playing with if he was a table and their current version
-        :return:
-        """
-        assert player_id not in self.pool, (f"Player duplicated - {player_id} is already in the pool")
-        self.pool.add(player_id)
-
-    def get_table(self):
-        if len(self.pool) <= self.min_pool:
-            return None
-
-        table = []
-
-        available_players = list(self.pool)
-        assert len(available_players) >= self.table_max_size
-        table_size = random.randint(self.table_min_size, self.table_max_size)
-
-        starter_idx = random.randint(0, len(available_players) - 1)
-        starter = available_players.pop(starter_idx)
-        table.append(starter)
-
-        starter_weights = self.weights[starter]
-        available_player_weights = []
-        # we then get the weights of the starter and pick from the remaining players based on those weights
-        for remaining_player in available_players:
-            available_player_weights.append(starter_weights[remaining_player])
-
-        # we invert them
-        max_weight = max(available_player_weights)
-        inverted_weights = [max_weight - remaining_player_weight + 1 for remaining_player_weight in available_player_weights]
-
-        # then we normalize them
-        normalized_player_weights = [inverted_weight / sum(inverted_weights) for
-                                    inverted_weight in inverted_weights]
-
-        assert math.isclose(sum(normalized_player_weights), 1.0, rel_tol=1e-5)
-
-        # select the followers based on their weight
-        followers = np.random.choice(available_players, p=normalized_player_weights, replace=False, size=table_size - 1)
-
-        for follower in followers:
-            follower = follower.item()
-            available_players.remove(follower)
-            table.append(follower)
-
-        for player in table:
-            self.pool.remove(player)
-
-        return table
-
-
-class PlanTableScheduler:
-    def __init__(self, table_min_size: int, table_max_size: int, player_ids):
-        self.player_ids = player_ids
-        self.table_max_size = table_max_size
-        self.table_min_size = table_min_size
-        assert table_max_size <= MAX_TABLE_SIZE
-        assert self.table_min_size <= self.table_max_size
-        # self.max_plans = 10
-        self.max_plans = np.inf
-        self.min_pool = max(table_max_size * 2, int(len(self.player_ids)/10))
-        self.plan_count = 0
-        self.weights = {
-            player_id: {
-                other_player_id: 0 for other_player_id in player_ids if player_id != other_player_id
-            } for player_id in player_ids
-        }
-        self.pool = set(self.player_ids[:])
-        self.plans: list[list[set]] = []
-        # self.was_updated = False
-        # self.already_returned_none = False
-
-    def _generate_plan(self):
-        """
-        We generate a partition of the all the players into tables based on their mutual weights at time of generation.
-        :return: a plan, which is a list of disjoint sets such that the union of all those sets is self.player_ids
-        """
-        available_players = self.player_ids[:]
-        plan = []
-        while len(available_players) >= self.table_min_size:  # we accept that some players might not get to play a plan
-            table = []
-            # we pick a random table size
-            if len(available_players) < self.table_max_size:
-                table_size = len(available_players)
-            else:
-                table_size = random.randint(self.table_min_size, self.table_max_size)
-                if len(available_players) - table_size < self.table_min_size:
-                    table_size = self.table_min_size
-
-            # we then pick a random player as the starter of the table
-            starter_idx = random.randint(0, len(available_players)-1)
-            starter = available_players.pop(starter_idx)
-            table.append(starter)
-
-            starter_weights = self.weights[starter]
-            available_player_weights = []
-            # we then get the weights of the starter and pick from the remaining players based on those weights
-            for remaining_player in available_players:
-                available_player_weights.append(starter_weights[remaining_player])
-
-            # we invert them
-            max_weight = max(available_player_weights)
-            inverted_weights = [max_weight - remaining_player_weight + 1 for remaining_player_weight in available_player_weights]
-
-            # then we normalize them
-            normalized_player_weights = [inverted_weight / sum(inverted_weights) for
-                                        inverted_weight in inverted_weights]
-
-            assert math.isclose(sum(normalized_player_weights), 1.0, rel_tol=1e-5)
-
-            # select the followers based on their weight
-            followers = np.random.choice(available_players, p=normalized_player_weights, replace=False, size=table_size-1)
-
-            for follower in followers:
-                follower = follower.item()
-                available_players.remove(follower)
-                table.append(follower)
-
-            plan.append(set(table))
-        return plan
-
-    def update_weights(self, player_id: int, other_players: list[tuple[int, int]]):
-        if other_players is not None:
-            player_weights = self.weights[player_id]
-            for other_player, other_player_version in other_players:
-                if other_player != player_id:
-                    player_weights[other_player] += other_player_version
-
-    def add(self, player_id: int):
-        """
-        Add a player into the scheduler to be scheduled for a game
-        :param player_id: Which player we are adding back in.
-        :param other_players:  The other players the player was playing with if he was a table and their current version
-        :return:
-        """
-        assert player_id not in self.pool, (f"Player duplicated - {player_id} is already in the pool")
-        self.pool.add(player_id)
-        # self.was_updated = True
-
-    def _find_table(self):
-        # we get the current plan and check if a table is available with the players in the pool
-        for i, plan in enumerate(self.plans):
-            for j, potential_table in enumerate(plan):
-                potential_table: set
-                # we check if it is a possible table
-                if potential_table.issubset(self.pool):
-                    # we found a suitable table
-                    table = plan.pop(j)
-                    if len(plan) == 0:
-                        self.plans.pop(i)  # we remove the empty list
-                    # we update the pool
-                    for player in table:
-                        self.pool.remove(player)
-
-                    return list(table)
-        return None
-
-    def get_table(self):
-        if len(self.pool) < self.min_pool:
-        # if not self.was_updated and self.already_returned_none:
-            # we have not changed since last query and we already verified that no table is available, we lazily return
-            return None
-
-        # we get the current plan and check if a table is available with the players in the pool
-        table = self._find_table()
-
-        if table is not None:
-            return table
-
-        # if we got here, it means no suitable table was found
-        # we first check if we already have too many plans
-        if len(self.plans) >= self.max_plans:
-            # too many plans, can't generate a new one, we wait until players catch up to move forward
-            # self.already_returned_none = True
-            return None
-
-        # we still have room to create a new plan
-        new_plan = self._generate_plan()
-        print(f"Newest plan ({self.plan_count}): {new_plan} | {len(self.plans)}")
-        self.plan_count += 1
-        self.plans.append(new_plan)
-        # self.was_updated = True
-
-        # we try to find a table again
-        table = self._find_table()
-        return table
+from src.ppo_self_play.scheduler import JITTableScheduler, HistoricalSampling
 
 
 class CasinoManager:
@@ -299,6 +84,13 @@ class CasinoManager:
             # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
             self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
+            self.historical_sampling_queue_len = 10
+            self.historical_sampling_send_queue = Queue(maxsize=0)
+            self.historical_sampling_receive_queue = Queue(maxsize=self.historical_sampling_queue_len)
+            self.historical_sampler = HistoricalSampling(self.player_ids, self.historical_sampling_send_queue,
+                                                         self.historical_sampling_receive_queue, self.log_folder,
+                                                         discrete, self.mode)
+
             self.table_send_queue = Queue(maxsize=0)
             self.table_receive_queue = Queue(maxsize=0)
 
@@ -311,6 +103,7 @@ class CasinoManager:
             self.table_ids = [table_id for table_id in range(NUM_TABLES)]
             TableActor = get_current_game_config()['table_actor']
             self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
+                                             self.historical_sampling_receive_queue,
                                              self.table_max_size, discrete, self.mode,
                                              self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
             for table in self.tables:
@@ -319,7 +112,9 @@ class CasinoManager:
             self.data_storage = DataStorage(self.player_ids, self.batch_size, self.log_folder)
 
             self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
-            self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue, device, discrete,
+            self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue,
+                                                 self.historical_sampling_send_queue,
+                                                 device, discrete,
                                                  self.log_folder, self.player_save_folder, self.mode)
                              for i in self.trainer_ids]
             for trainer in self.trainers:
@@ -470,7 +265,8 @@ class CasinoManager:
                 # send the player_winnings to the leaderboard
                 self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
                                                    self.is_playing, self.is_training, self.is_playing_against,
-                                                   self.player_dispatch_times))
+                                                   self.player_dispatch_times, self.table_scheduler.historical_players_used,
+                                                   len(self.historical_sampler)))
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
@@ -576,13 +372,14 @@ class CasinoManager:
                         data = {
                             "type": "players",
                             "player_ids": player_ids,
-                            "player_refs": [self.players[player_id] for player_id in player_ids],
-                            "player_versions": [self.player_training_counts[p_id] for p_id in player_ids],
+                            "player_refs": [self.players[player_id] if player_id >= 0 else None for player_id in player_ids],
+                            "player_versions": [self.player_training_counts[p_id] if p_id >= 0 else None for p_id in player_ids],
                             "table_params": table_params
                         }
                         self.table_send_queue.put_nowait(data)
 
                         for p_id in player_ids:
+                            if p_id < 0: continue
                             self.is_playing[p_id] = True
                             self.is_playing_against[p_id] = [player_id for player_id in player_ids if player_id != p_id]
                             self.player_dispatch_times[p_id] = time.time()
