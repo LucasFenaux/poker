@@ -5,6 +5,7 @@ import numpy as np
 import ray
 from ray.util.queue import Empty
 import torch
+import asyncio
 
 from src.ppo_self_play.global_settings import (MAX_TABLE_SIZE, HISTORY_LOG_WIDTH, USE_HISTORICAL_SAMPLING,
                                                HISTORICAL_SAMPLING_RATE, HISTORY_BURN_IN, IS_RECURRENT)
@@ -34,7 +35,7 @@ class JITTableScheduler:
         if other_players is not None:
             player_weights = self.weights[player_id]
             for other_player, other_player_version in other_players:
-                if other_player != player_id:
+                if other_player != player_id and other_player >= 0:
                     player_weights[other_player] += other_player_version
 
     def add(self, player_id: int):
@@ -68,11 +69,13 @@ class JITTableScheduler:
             self.historical_players_used += 1
             table.append(-self.historical_players_used)  # -id indicates that the table should sample a historical player
 
+        for player in table:
+            if player >= 0:
+                self.pool.remove(player)
+
         return table
 
     def _get_table(self):
-        if len(self.pool) <= self.min_pool:
-            return None
 
         table = []
 
@@ -114,6 +117,8 @@ class JITTableScheduler:
         return table
 
     def get_table(self):
+        if len(self.pool) <= self.min_pool:
+            return None
         if USE_HISTORICAL_SAMPLING:
             if random.random() < HISTORICAL_SAMPLING_RATE:
                 return self._get_history_table()
@@ -123,7 +128,9 @@ class JITTableScheduler:
 
 @ray.remote(num_cpus=0)
 class HistoricalSampling:
+    sampling_types = ["uniform", "loguniform"]
     def __init__(self, player_ids, in_queue, out_queue, player_save_folder, discrete, mode):
+        self.sampling_mode = "uniform"
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.player_ids = player_ids
@@ -133,6 +140,52 @@ class HistoricalSampling:
         self.checkpoints = {}
         self.num_checkpoints = 0
 
+        import glob
+        import os
+        import torch
+        from src.player_ai import PlayerAI, RNNPlayerAI
+        from src.ppo_self_play.alg import PPO, RNNPPO
+        from src.ppo_self_play.global_settings import IS_RECURRENT
+        import json
+        
+        counts_path = os.path.join(self.player_save_folder, "sampling_counts.json")
+        if os.path.exists(counts_path):
+            with open(counts_path, "r") as f:
+                self.sampling_counts = json.load(f)
+        else:
+            self.sampling_counts = {}
+        self.total_samples = 0
+
+        for player_id in self.player_ids:
+            hist_files = glob.glob(os.path.join(self.player_save_folder, f"{player_id}_*.pt"))
+            if hist_files:
+                print(f"HistoricalSampling: Resuming {len(hist_files)} checkpoints for player {player_id}")
+            # sort files by version to add them in the correct order
+            hist_files.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0]))
+            
+            for f in hist_files:
+                loaded_data = torch.load(f, map_location=torch.device("cpu"), weights_only=True)
+                version = int(os.path.basename(f).split('_')[1].split('.')[0])
+                
+                if IS_RECURRENT:
+                    player = RNNPlayerAI(RNNPPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+                else:
+                    player = PlayerAI(PPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+                
+                if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+                    player.load_params(loaded_data[0])
+                else:
+                    player.load_params(loaded_data)
+                
+                psd_ref = ray.put(player)
+                
+                if self.sampling_mode == "uniform":
+                    self._add_uniform(player_id, version, psd_ref)
+                elif self.sampling_mode == "loguniform":
+                    self._add_loguniform(player_id, version, psd_ref)
+                
+                self.num_checkpoints += 1
+
     @staticmethod
     def should_add(player_version):
         if player_version < HISTORY_BURN_IN:
@@ -141,20 +194,83 @@ class HistoricalSampling:
         return player_version % (HISTORY_LOG_WIDTH**(int(math.log(player_version, HISTORY_LOG_WIDTH)))) == 0
 
     def can_sample(self):
-        return len(self.checkpoints) > 10
+        return self.num_checkpoints > 10
 
     def sample(self):
         if len(list(self.checkpoints.values())) == 0:
             raise AttributeError
+
+        if self.sampling_mode == "uniform":
+            player_id, version, psd_ref = self._sample_uniform()
+        elif self.sampling_mode == "loguniform":
+            player_id, version, psd_ref = self._sample_loguniform()
+        else:
+            raise NotImplementedError
+
+        # Track sampling counts
+        str_p_id = str(player_id)
+        str_ver = str(version)
+        if str_p_id not in getattr(self, 'sampling_counts', {}):
+            if not hasattr(self, 'sampling_counts'):
+                self.sampling_counts = {}
+            self.sampling_counts[str_p_id] = {}
+        
+        self.sampling_counts[str_p_id][str_ver] = self.sampling_counts[str_p_id].get(str_ver, 0) + 1
+        
+        self.total_samples = getattr(self, 'total_samples', 0) + 1
+        if self.total_samples % 100 == 0:
+            import json
+            with open(os.path.join(self.player_save_folder, "sampling_counts.json"), "w") as f:
+                json.dump(self.sampling_counts, f, indent=4)
+
+        return {"ref": psd_ref}
+
+    def _sample_loguniform(self):
         cur_keys = list(self.checkpoints.keys())
-        player_bins = self.checkpoints[random.choice(cur_keys)]
+        player_id = random.choice(cur_keys)
+        player_bins = self.checkpoints[player_id]
 
         selected_bin = random.choice(player_bins)
+        version, psd_ref = random.choice(selected_bin)
+        return player_id, version, psd_ref
 
-        return random.choice(selected_bin)
+    def _sample_uniform(self):
+        cur_keys = list(self.checkpoints.keys())
+        player_id = random.choice(cur_keys)
+        player_lists = self.checkpoints[player_id]
+        sample = random.choice(player_lists)
+        while isinstance(sample, list):
+            sample = random.choice(sample)
+
+        version, psd_ref = sample
+        return player_id, version, psd_ref
 
     def save(self, player_id, player_state_dicts, player_version):
         torch.save(player_state_dicts, os.path.join(self.player_save_folder, f"{player_id}_{player_version}.pt"))
+
+    def _add_loguniform(self, player_id, version, psd_ref):
+        item = (version, psd_ref)
+        if player_id not in self.checkpoints:
+            self.checkpoints[player_id] = [[item, ], ]
+        else:
+            last_bin = self.checkpoints[player_id][-1]
+            if len(last_bin) >= HISTORY_LOG_WIDTH:
+                self.checkpoints[player_id].append([item, ])
+            else:
+                self.checkpoints[player_id][-1].append(item)
+
+    def _add_uniform(self, player_id, version, psd_ref):
+        item = (version, psd_ref)
+        # in uniform (exponential decay), we have recursive lists that can contain either items or lists.
+        if player_id not in self.checkpoints:
+            self.checkpoints[player_id] = [item, ]
+        else:
+            if ((not isinstance(self.checkpoints[player_id][0], list) and len(self.checkpoints[player_id]) >= HISTORY_LOG_WIDTH - 1)
+                    or len(self.checkpoints[player_id]) >= HISTORY_LOG_WIDTH):
+                # we are either at the lowest level where there are no lists yet or we take into account the list containing the recursion
+                self.checkpoints[player_id] = [self.checkpoints[player_id], item]
+            else:
+                self.checkpoints[player_id].append(item)
 
     def add(self, player_id, player_state_dicts, player_version):
         # double check that the player version is valid
@@ -170,26 +286,29 @@ class HistoricalSampling:
         player.load_params(player_state_dicts[0])
 
         psd_ref = ray.put(player)
-        if player_id not in self.checkpoints:
-            self.checkpoints[player_id] = [[psd_ref,],]
+
+        if self.sampling_mode == "uniform":
+            self._add_uniform(player_id, player_version, psd_ref)
+        elif self.sampling_mode == "loguniform":
+            self._add_loguniform(player_id, player_version, psd_ref)
         else:
-            last_bin = self.checkpoints[player_id][-1]
-            if len(last_bin) >= HISTORY_LOG_WIDTH:
-                self.checkpoints[player_id].append([psd_ref,])
-            else:
-                self.checkpoints[player_id][-1].append(psd_ref)
+            raise NotImplementedError
 
         self.save(player_id, player_state_dicts, player_version)
         self.num_checkpoints += 1
 
-    def start(self):
+
+    async def start(self):
         while True:
             while self.out_queue.qsize() < self.out_queue.maxsize and self.can_sample():
-                self.out_queue.put(self.sample())
+                self.out_queue.put_nowait(self.sample())
 
             try:
-                data = self.in_queue.get(block=True, timeout=0.1)
+                data = self.in_queue.get_nowait()
+                await asyncio.sleep(0)
+
             except Empty:
+                await asyncio.sleep(0.05)
                 continue
 
             player_id, player_state_dicts, player_version = (data["player_id"], data["player_state_dicts"],
@@ -197,7 +316,7 @@ class HistoricalSampling:
 
             self.add(player_id, player_state_dicts, player_version)
 
-    def __len__(self):
+    def len(self):
         return self.num_checkpoints
 
 

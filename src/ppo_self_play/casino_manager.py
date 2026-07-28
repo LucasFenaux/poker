@@ -22,7 +22,7 @@ from src.ppo_self_play.scheduler import JITTableScheduler, HistoricalSampling
 
 class CasinoManager:
     def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
-                 bc_pretrained_model_path: str = None):
+                 bc_pretrained_model_path: str = None, resume: bool = False):
         try:
             self.player_ids = list(range(NUM_PLAYERS))
             self.device = device
@@ -30,6 +30,8 @@ class CasinoManager:
             os.makedirs(self.save_folder, exist_ok=True)
             self.player_save_folder = os.path.join(save_folder, "players")
             os.makedirs(self.player_save_folder, exist_ok=True)
+            self.historical_save_folder = os.path.join(save_folder, "historical_checkpoints")
+            os.makedirs(self.historical_save_folder, exist_ok=True)
             run_name = os.path.basename(save_folder)
             self.log_folder = os.path.join(os.path.dirname(save_folder), "tb_logs", run_name)
             os.makedirs(self.log_folder, exist_ok=True)
@@ -55,6 +57,8 @@ class CasinoManager:
             else:
                 self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                                 self.player_ids]
+            self.player_training_counts = [0] * len(self.player_ids)
+            
             if bc_pretrained_model_path is not None:
                 print(f"Loading pretrained model from {bc_pretrained_model_path}")
                 # load the model
@@ -67,8 +71,37 @@ class CasinoManager:
                     loaded_players.append(ray.put(player))
 
                 self.players = loaded_players
+            elif resume:
+                print(f"Resuming models from {self.player_save_folder}")
+                loaded_players = []
+                for player_id in self.player_ids:
+                    player = ray.get(self.players[player_id])
+                    model_path = os.path.join(self.player_save_folder, f"{player_id}.pt")
+                    if os.path.exists(model_path):
+                        loaded_data = torch.load(model_path, map_location=torch.device("cpu"), weights_only=True)
+                        if isinstance(loaded_data, tuple) and len(loaded_data) == 3:
+                            new_weights, new_optimizer_params, count = loaded_data
+                            player.load_params(new_weights)
+                            player.load_optimizers(new_optimizer_params)
+                            self.player_training_counts[player_id] = count
+                        elif isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+                            new_weights, new_optimizer_params = loaded_data
+                            player.load_params(new_weights)
+                            player.load_optimizers(new_optimizer_params)
+                        else:
+                            player.load_params(loaded_data)
+                    loaded_players.append(ray.put(player))
+                self.players = loaded_players
 
-            self.player_training_counts = [0] * len(self.player_ids)
+            if resume:
+                import glob
+                # Verify if any counts were NOT loaded from .pt files (older checkpoints fallback)
+                for player_id in self.player_ids:
+                    if self.player_training_counts[player_id] == 0:
+                        hist_files = glob.glob(os.path.join(self.historical_save_folder, f"{player_id}_*.pt"))
+                        if hist_files:
+                            versions = [int(os.path.basename(f).split('_')[1].split('.')[0]) for f in hist_files]
+                            self.player_training_counts[player_id] = max(versions)
 
             self.table_max_size = 2
             self.table_min_size = 2
@@ -82,14 +115,26 @@ class CasinoManager:
             self.on_policy = True
 
             # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
-            self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
 
             self.historical_sampling_queue_len = 10
             self.historical_sampling_send_queue = Queue(maxsize=0)
             self.historical_sampling_receive_queue = Queue(maxsize=self.historical_sampling_queue_len)
-            self.historical_sampler = HistoricalSampling(self.player_ids, self.historical_sampling_send_queue,
-                                                         self.historical_sampling_receive_queue, self.log_folder,
+            self.historical_sampler = HistoricalSampling.remote(self.player_ids, self.historical_sampling_send_queue,
+                                                         self.historical_sampling_receive_queue, self.historical_save_folder,
                                                          discrete, self.mode)
+            self.historical_sampler.start.remote()
+            
+            historical_players_used = 0
+            if resume:
+                import json
+                state_path = os.path.join(self.save_folder, "leaderboard_state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, "r") as f:
+                        state = json.load(f)
+                        historical_players_used = state.get("historical_players_used", 0)
+                        
+            self.table_scheduler = JITTableScheduler(self.table_min_size, self.table_max_size, self.player_ids, self.historical_sampling_receive_queue)
+            self.table_scheduler.historical_players_used = historical_players_used
 
             self.table_send_queue = Queue(maxsize=0)
             self.table_receive_queue = Queue(maxsize=0)
@@ -266,7 +311,7 @@ class CasinoManager:
                 self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
                                                    self.is_playing, self.is_training, self.is_playing_against,
                                                    self.player_dispatch_times, self.table_scheduler.historical_players_used,
-                                                   len(self.historical_sampler)))
+                                                   self.historical_sampler.len.remote()))
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
@@ -456,6 +501,8 @@ class CasinoManager:
                 print("Casino terminated")
             else:
                 print(f"Casino error: {e}")
+                import traceback
+                traceback.print_exc()
             return
         finally:
             # tell the casino to shut down

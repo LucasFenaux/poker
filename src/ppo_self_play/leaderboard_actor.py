@@ -52,6 +52,27 @@ class LeaderboardActor:
         self.is_training = {}
         self.is_playing_against = {}
         self.player_dispatch_times = {}
+        self.historical_players_used = 0
+        self.num_historical_checkpoints = 0
+        
+        # Resume state if it exists
+        hist_path = os.path.join(self.save_folder, "winning_histogram.json")
+        if os.path.exists(hist_path):
+            with open(hist_path, "r") as f:
+                loaded = json.load(f)
+                self.history_player_winnings = {int(k): v for k, v in loaded.items()}
+                
+        state_path = os.path.join(self.save_folder, "leaderboard_state.json")
+        if os.path.exists(state_path):
+            with open(state_path, "r") as f:
+                state = json.load(f)
+                self.number_games_played = {int(k): v for k, v in state.get("number_games_played", {}).items()}
+                self.historical_players_used = state.get("historical_players_used", 0)
+                
+                # estimate last_saved_avg so it doesn't immediately overwrite
+                total_games = sum(self.number_games_played.values())
+                current_avg_int = int(total_games / max(1, len(self.player_ids)))
+                self.last_saved_avg = current_avg_int
 
     async def start(self):
         while not self.is_done:
@@ -71,6 +92,8 @@ class LeaderboardActor:
                     self.is_training = is_training
                     self.is_playing_against = is_playing_against
                     self.player_dispatch_times = player_dispatch_times
+                    self.historical_players_used = historical_players_used
+                    self.num_historical_checkpoints = num_historical_checkpoints
 
                     self.update(player_id, player_winnings)
 
@@ -243,7 +266,9 @@ class LeaderboardActor:
             "num_tables": self.num_tables,
             "num_trainers": self.num_trainers,
             "target_tables": self.target_num_tables if self.target_num_tables is not None else self.num_tables,
-            "target_trainers": self.target_num_trainers if self.target_num_trainers is not None else self.num_trainers
+            "target_trainers": self.target_num_trainers if self.target_num_trainers is not None else self.num_trainers,
+            "historical_players_used": self.historical_players_used,
+            "num_historical_checkpoints": ray.get(self.num_historical_checkpoints) if isinstance(self.num_historical_checkpoints, ray.ObjectRef) else self.num_historical_checkpoints
         }
 
     def save(self):
@@ -251,6 +276,12 @@ class LeaderboardActor:
         os.makedirs(self.save_folder, exist_ok=True)
         with open(os.path.join(self.save_folder, "winning_histogram.json"), "w") as f:
             json.dump(self.history_player_winnings, f, indent=4, cls=PokerEncoder)
+            
+        with open(os.path.join(self.save_folder, "leaderboard_state.json"), "w") as f:
+            json.dump({
+                "historical_players_used": self.historical_players_used,
+                "number_games_played": self.number_games_played
+            }, f, indent=4)
 
         # 2. Generate and Save Table
         all_time, recent_top = self.generate_leaderboard_data()

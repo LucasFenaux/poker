@@ -34,8 +34,10 @@ class TrainerActor:
         log_path = os.path.join(self.log_folder, "tensorboard_logs")
         self.writer = SummaryWriter(log_dir=log_path)
 
-    def save_player(self, player_id, params):
-        torch.save(params, os.path.join(self.player_save_folder, f"{player_id}.pt"))
+    def save_player(self, player_id, params, player_training_count):
+        new_weights, new_optimizer_params = params
+        save_data = (new_weights, new_optimizer_params, player_training_count)
+        torch.save(save_data, os.path.join(self.player_save_folder, f"{player_id}.pt"))
 
     def run(self, player_id, player_state_dicts, data_batch, player_training_count: int, optimizer_state_dict = None):
         try:
@@ -209,7 +211,7 @@ class TrainerActor:
 
                 params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
                 if params is not None:
-                    self.save_player(player_id, params)
+                    self.save_player(player_id, params, player_training_count + 1)
 
                 # check if we need to add to historical players saved
                 new_player_version = player_training_count + 1

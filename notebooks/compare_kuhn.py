@@ -24,7 +24,9 @@ def load_eval_models(model_path, device):
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
 
-    if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+    if isinstance(loaded_data, tuple) and len(loaded_data) == 3:
+        checkpoint = loaded_data[0]
+    elif isinstance(loaded_data, tuple) and len(loaded_data) == 2:
         checkpoint = loaded_data[0]
     else:
         checkpoint = loaded_data
@@ -104,49 +106,59 @@ def evaluate():
         return
         
     players_dir = os.path.join(run_folder, "players")
-    model_files = glob.glob(os.path.join(players_dir, "*.pt"))
+    historical_dir = os.path.join(run_folder, "historical_checkpoints")
+    
+    current_model_files = glob.glob(os.path.join(players_dir, "*.pt"))
+    historical_model_files = glob.glob(os.path.join(historical_dir, "*.pt"))
+    
+    model_files = current_model_files + historical_model_files
+    
     if not model_files:
-        print("No .pt files found in players dir.")
+        print("No .pt files found in players or historical_checkpoints dir.")
         return
         
-    print(f"Found {len(model_files)} models in {players_dir}")
+    print(f"Found {len(current_model_files)} current models and {len(historical_model_files)} historical models in {run_folder}")
     
-    print("\nComputing distances between networks...")
-    def get_flat_weights(wrapper):
-        return torch.cat([p.view(-1) for p in wrapper.network.parameters() if p.requires_grad])
-        
-    if IS_RECURRENT:
-        dummy_policy, _ = RNNPPO.init_networks(device, mode="beta", discrete=False)
-        dummy_wrapper = RNNPPOInferenceWrapper((dummy_policy,), discrete=False)
-    else:
-        dummy_policy, _ = PPO.init_networks(device, mode="beta", discrete=False)
-        dummy_wrapper = PPOInferenceWrapper((dummy_policy,), discrete=False)
-        
-    dummy_weights = get_flat_weights(dummy_wrapper)
-    
-    model_weights_dict = {}
-    for idx, model_path in enumerate(model_files):
-        wrapper, _ = load_eval_models(model_path, device)
-        model_weights_dict[f"Model_{idx}"] = get_flat_weights(wrapper)
-        
-    dummy_distances = []
-    for name, w in model_weights_dict.items():
-        dist = torch.norm(dummy_weights - w).item()
-        dummy_distances.append(dist)
-        
-    print(f"Avg L2 Distance (Dummy vs Trained): {sum(dummy_distances)/len(dummy_distances):.4f} (Min: {min(dummy_distances):.4f}, Max: {max(dummy_distances):.4f})")
-    
-    pairwise_distances = []
-    names = list(model_weights_dict.keys())
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            dist = torch.norm(model_weights_dict[names[i]] - model_weights_dict[names[j]]).item()
-            pairwise_distances.append(dist)
-            
-    if pairwise_distances:
-        print(f"Avg L2 Distance (Trained vs Trained): {sum(pairwise_distances)/len(pairwise_distances):.4f} (Min: {min(pairwise_distances):.4f}, Max: {max(pairwise_distances):.4f})")
-    else:
-        print("Not enough models for Pairwise Trained distances.")
+    # print("\nComputing distances between networks...")
+    # def get_flat_weights(wrapper):
+    #     return torch.cat([p.view(-1) for p in wrapper.network.parameters() if p.requires_grad])
+    #
+    # if IS_RECURRENT:
+    #     dummy_policy, _ = RNNPPO.init_networks(device, mode="beta", discrete=False)
+    #     dummy_wrapper = RNNPPOInferenceWrapper((dummy_policy,), discrete=False)
+    # else:
+    #     dummy_policy, _ = PPO.init_networks(device, mode="beta", discrete=False)
+    #     dummy_wrapper = PPOInferenceWrapper((dummy_policy,), discrete=False)
+    #
+    # dummy_weights = get_flat_weights(dummy_wrapper)
+    #
+    # model_weights_dict = {}
+    # for model_path in model_files:
+    #     is_historical = "historical_checkpoints" in model_path
+    #     filename = os.path.basename(model_path).replace(".pt", "")
+    #     name = f"Hist_{filename}" if is_historical else f"Curr_{filename}"
+    #
+    #     wrapper, _ = load_eval_models(model_path, device)
+    #     model_weights_dict[name] = get_flat_weights(wrapper)
+    #
+    # dummy_distances = []
+    # for name, w in model_weights_dict.items():
+    #     dist = torch.norm(dummy_weights - w).item()
+    #     dummy_distances.append(dist)
+    #
+    # print(f"Avg L2 Distance (Dummy vs Trained): {sum(dummy_distances)/len(dummy_distances):.4f} (Min: {min(dummy_distances):.4f}, Max: {max(dummy_distances):.4f})")
+    #
+    # pairwise_distances = []
+    # names = list(model_weights_dict.keys())
+    # for i in range(len(names)):
+    #     for j in range(i + 1, len(names)):
+    #         dist = torch.norm(model_weights_dict[names[i]] - model_weights_dict[names[j]]).item()
+    #         pairwise_distances.append(dist)
+    #
+    # if pairwise_distances:
+    #     print(f"Avg L2 Distance (Trained vs Trained): {sum(pairwise_distances)/len(pairwise_distances):.4f} (Min: {min(pairwise_distances):.4f}, Max: {max(pairwise_distances):.4f})")
+    # else:
+    #     print("Not enough models for Pairwise Trained distances.")
         
     print("=========================================\n")
     

@@ -631,7 +631,7 @@ class BaseTableActor:
                         assert p_ref is None
                         assert p_ver is None
                         # fetch the historical player ref
-                        player_refs.append(self.historical_sampling_receive_queue.get())
+                        player_refs.append(self.historical_sampling_receive_queue.get()["ref"])
                         player_versions.append(-1)  # irrelevant
                 try:
                     players = ray.get(player_refs)
@@ -740,9 +740,12 @@ class HoldemTableActor(BaseTableActor):
 
 @ray.remote(num_cpus=0)
 class KuhnTableActor(BaseTableActor):
-    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,
+                 historical_sampling_receive_queue: Queue,
+                 max_table_size: int, discrete: bool,
                  model_mode: str, batch_size: int, log_folder: str):
-        super().__init__(table_id, device, in_queue, out_queue, max_table_size, discrete, model_mode, batch_size, log_folder)
+        super().__init__(table_id, device, in_queue, out_queue, historical_sampling_receive_queue,
+                         max_table_size, discrete, model_mode, batch_size, log_folder)
         self.linear_replay = 1  # less replay since we quickly hit the batch limit
 
     def _play_tree_round(self):
