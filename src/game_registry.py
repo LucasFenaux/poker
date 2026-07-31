@@ -88,7 +88,7 @@ HYPERPARAMETER_REGISTRY = {
         False: {  # is recurrent
         },
         True: {
-            "entropy_coef": 0.
+            "entropy_coef": 1e-2
             # "lr": 1e-3,  # higher learning rate to boost learning
             # "value_lr": 5e-3,   # adjusting the value lr accordingly
         }

@@ -9,6 +9,6 @@ echo "Keeping the $KEEP most recent runs and deleting the rest."
 
 # We inject the $KEEP variable directly into the string sent to Docker.
 # Notice we removed the internal X= from the Docker command entirely!
-docker compose run --rm casino_backend bash -c "cd /app/results && ls -d run_* | head -n -$KEEP | xargs rm -rf"
+docker compose run --rm casino_backend bash -c "cd /app/results && for dir in \$(ls -d run_* 2>/dev/null | head -n -$KEEP); do rm -rf \$dir tb_logs/\$dir; done"
 
 echo "Cleanup complete!"

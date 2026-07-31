@@ -36,14 +36,32 @@ if __name__ == '__main__':
         ray.init("auto", namespace="casino",
                  )
         device = torch.device("cpu")
-        save_folder = get_save_folder()
+        
         from src.ppo_self_play.global_settings import GAME_TYPE
+        
+        resume = os.environ.get("RESUME_LATEST", "").lower() == "true"
+        if resume:
+            import glob
+            base_path = os.path.abspath("results")
+            runs = glob.glob(os.path.join(base_path, f"run_{GAME_TYPE}_*"))
+            if runs:
+                runs.sort(key=os.path.getmtime)
+                save_folder = runs[-1]
+                print(f"Resuming latest run: {save_folder}")
+            else:
+                print("No runs found to resume, starting fresh!")
+                save_folder = get_save_folder()
+                resume = False
+        else:
+            save_folder = get_save_folder()
+
         if GAME_TYPE == "KUHN":
             bc_pretrained_model_path = None
         else:
             bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
-                                               bc_pretrained_model_path=bc_pretrained_model_path)
+                                               bc_pretrained_model_path=bc_pretrained_model_path,
+                                               resume=resume)
         manager.start()
         ray.shutdown()
     except Exception as e:

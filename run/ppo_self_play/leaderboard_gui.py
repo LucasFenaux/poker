@@ -110,7 +110,19 @@ class LeaderboardGUI:
         self.lbl_players_training = tk.Label(self.frame_players, text="Train: 0", font=("Arial", 14))
         self.lbl_players_training.pack(side='left', padx=4)
 
-        # 5. Reset Button
+        # 5. Historical Stats Sub-frame
+        ttk.Separator(self.control_frame, orient='vertical').pack(side='left', fill='y', padx=10)
+
+        self.frame_historical = tk.Frame(self.control_frame)
+        self.frame_historical.pack(side='left', padx=10)
+
+        self.lbl_historical_used = tk.Label(self.frame_historical, text="Hist Used: 0", font=("Arial", 14))
+        self.lbl_historical_used.pack(side='left', padx=4)
+
+        self.lbl_historical_checkpoints = tk.Label(self.frame_historical, text="Checkpoints: 0", font=("Arial", 14))
+        self.lbl_historical_checkpoints.pack(side='left', padx=4)
+
+        # 6. Reset Button
         self.btn_reset = tk.Button(self.control_frame, text="Reset Defaults", command=self.reset_defaults, bg="#ffcccc",
                                    highlightbackground="#ffcccc")
         self.btn_reset.pack(side='right', padx=10)
@@ -210,6 +222,10 @@ class LeaderboardGUI:
             self.lbl_players_waiting.config(text=f"Wait: {data.get('num_waiting', 0)}")
             self.lbl_players_playing.config(text=f"Play: {data.get('num_playing', 0)}")
             self.lbl_players_training.config(text=f"Train: {data.get('num_training', 0)}")
+
+            # Update historical stats
+            self.lbl_historical_used.config(text=f"Hist Used: {data.get('historical_players_used', 0)}")
+            self.lbl_historical_checkpoints.config(text=f"Checkpoints: {data.get('num_historical_checkpoints', 0)}")
 
             # Update state with backend data
             self.actual_tables = data.get('num_tables', 0)

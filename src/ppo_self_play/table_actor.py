@@ -15,7 +15,7 @@ from src.state_interpreter import extract_state_snapshot
 from src.ppo_self_play.alg import PPOInferenceWrapper, PPO, RNNPPOInferenceWrapper, RNNPPO
 from src.player_ai import PlayerAI, RNNPlayerAI
 from src.shared import SemanticTimer
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.ppo_self_play.global_settings import IS_RECURRENT, HISTORICAL_SAMPLING_RATE
 import traceback
 
 
@@ -30,13 +30,16 @@ class BaseTableActor:
         "mode": "tree"
     }
 
-    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,
+                 historical_sampling_receive_queue: Queue,
+                 max_table_size: int, discrete: bool,
                  model_mode: str, batch_size: int, log_folder: str):
         self.table_id = table_id
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.device = device
         self.discrete = discrete
+        self.historical_sampling_receive_queue = historical_sampling_receive_queue
         self.max_table_size = max_table_size
         ActionInterpreter = get_current_game_config()["action_interpreter"]
         self.action_interpreter = ActionInterpreter(model_mode)
@@ -614,19 +617,32 @@ class BaseTableActor:
                 assert data["type"] == "players"
 
                 player_ids = data["player_ids"]
+                # we need to filter out historical players
+                player_refs = []
+                player_versions = []
+                regular_player_ids = []
 
+                for p_id, p_ref, p_ver in zip(player_ids, data["player_refs"], data["player_versions"]):
+                    if p_id >= 0:
+                        regular_player_ids.append(p_id)
+                        player_refs.append(p_ref)
+                        player_versions.append(p_ver)
+                    else:
+                        assert p_ref is None
+                        assert p_ver is None
+                        # fetch the historical player ref
+                        player_refs.append(self.historical_sampling_receive_queue.get()["ref"])
+                        player_versions.append(-1)  # irrelevant
                 try:
-                    players = ray.get(data["player_refs"])
-                    self.current_player_versions = data["player_versions"]
-
-                    # player_params_list = [player.get_params() for player in players]
+                    players = ray.get(player_refs)
+                    self.current_player_versions = player_versions
 
                     session_hand_info = {
                         pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": [],
                               "hand_memories": [], "game_memories": [], "new_hands": []}
-                        for pid in player_ids
+                        for pid in regular_player_ids
                     }
-                    session_player_winnings = {pid: 0.0 for pid in player_ids}
+                    session_player_winnings = {pid: 0.0 for pid in regular_player_ids}
 
                     for _ in range(self.linear_replay if IS_RECURRENT else self.replay):
                         shuffle = list(range(len(player_ids)))
@@ -640,6 +656,9 @@ class BaseTableActor:
                         if success:
                             # Aggregate data into the session accumulators
                             for pid in player_ids:
+                                # need to make sure we only look at actual players
+                                if pid < 0: continue
+
                                 if IS_RECURRENT:
                                     # we again append rather than extend to keep the per-game structure
                                     # so for recurrent models, the structure becomes [per_game[per_hand[]]]
@@ -665,6 +684,8 @@ class BaseTableActor:
                     batch = []
                     # Send the batched data exactly once per session
                     for pid in player_ids:
+                        if pid < 0: continue  # only regular players get sent back
+
                         p_index = player_ids.index(pid)
                         p_version = self.current_player_versions[p_index]
                         if IS_RECURRENT:
@@ -684,6 +705,8 @@ class BaseTableActor:
                         })
                     # now we send back the players
                     for player_id in player_ids:
+                        if player_id < 0: continue
+
                         other_players = [(pid, self.current_player_versions[player_ids.index(pid)]) for pid in player_ids if player_id != pid]
                         batch.append({
                             "type": "player",
@@ -701,6 +724,8 @@ class BaseTableActor:
 
                     # now we send back the players
                     for player_id in player_ids:
+                        if player_id < 0: continue
+
                         batch.append({
                             "type": "player",
                             "table_id": self.table_id,
@@ -715,9 +740,12 @@ class HoldemTableActor(BaseTableActor):
 
 @ray.remote(num_cpus=0)
 class KuhnTableActor(BaseTableActor):
-    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue, max_table_size: int, discrete: bool,
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,
+                 historical_sampling_receive_queue: Queue,
+                 max_table_size: int, discrete: bool,
                  model_mode: str, batch_size: int, log_folder: str):
-        super().__init__(table_id, device, in_queue, out_queue, max_table_size, discrete, model_mode, batch_size, log_folder)
+        super().__init__(table_id, device, in_queue, out_queue, historical_sampling_receive_queue,
+                         max_table_size, discrete, model_mode, batch_size, log_folder)
         self.linear_replay = 1  # less replay since we quickly hit the batch limit
 
     def _play_tree_round(self):

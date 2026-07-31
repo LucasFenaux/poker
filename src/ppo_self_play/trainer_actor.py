@@ -9,15 +9,18 @@ from torch.utils.tensorboard import SummaryWriter
 from src.ppo_self_play.alg import PPO, RNNPPO
 from src.ppo_self_play.global_settings import IS_RECURRENT
 from src.game_registry import get_current_game_hyperparameters
+from src.ppo_self_play.scheduler import HistoricalSampling
 
 
 @ray.remote(num_cpus=1)
 class TrainerActor:
-    def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, device, discrete: bool, log_folder: str,
+    def __init__(self, trainer_id: int, in_queue: Queue, out_queue: Queue, historical_sampling_send_queue: Queue,
+                 device, discrete: bool, log_folder: str,
                  player_save_folder: str, mode: str) -> None:
         self.trainer_id = trainer_id
         self.in_queue = in_queue
         self.out_queue = out_queue
+        self.historical_sampling_send_queue = historical_sampling_send_queue
         self.mode = mode
         if IS_RECURRENT:
             self.models = PPO.init_networks(device, discrete, mode)
@@ -31,8 +34,10 @@ class TrainerActor:
         log_path = os.path.join(self.log_folder, "tensorboard_logs")
         self.writer = SummaryWriter(log_dir=log_path)
 
-    def save_player(self, player_id, params):
-        torch.save(params, os.path.join(self.player_save_folder, f"{player_id}.pt"))
+    def save_player(self, player_id, params, player_training_count):
+        new_weights, new_optimizer_params = params
+        save_data = (new_weights, new_optimizer_params, player_training_count)
+        torch.save(save_data, os.path.join(self.player_save_folder, f"{player_id}.pt"))
 
     def run(self, player_id, player_state_dicts, data_batch, player_training_count: int, optimizer_state_dict = None):
         try:
@@ -206,7 +211,18 @@ class TrainerActor:
 
                 params = self.run(player_id, player.get_params(), batch, player_training_count, player.get_optimizer_params())
                 if params is not None:
-                    self.save_player(player_id, params)
+                    self.save_player(player_id, params, player_training_count + 1)
+
+                # check if we need to add to historical players saved
+                new_player_version = player_training_count + 1
+                if HistoricalSampling.should_add(new_player_version):
+                    data = {
+                        "player_id": player_id,
+                        "player_state_dicts": params,
+                        "player_version": new_player_version,
+                    }
+                    self.historical_sampling_send_queue.put_nowait(data)
+
             except Exception as e:
                 print(f"CRITICAL TRAINER CRASH! Rescuing player {player_id}: {e}")
                 traceback.print_exc()
