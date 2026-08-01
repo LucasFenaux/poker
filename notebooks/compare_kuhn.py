@@ -2,15 +2,13 @@ import os
 import sys
 import glob
 import torch
-import random
-
 # Ensure we can import from src
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
 
 from src.state_interpreter import StateSnapshot
-from src.ppo_self_play.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
+from src.global_settings import IS_RECURRENT
 
 from src.vanilla_cfr.kuhn_poker_solve import Node, Player, cfr_traversal
 
@@ -212,7 +210,7 @@ def evaluate():
     cfr_p1, cfr_p2 = train_cfr(100_000)
     
     model_evaluations = []
-    from src.ppo_self_play.global_settings import GAME_TYPE
+    from src.global_settings import GAME_TYPE
     from src.action_interpreter import Action
 
     for model_path in model_files:

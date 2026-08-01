@@ -2,7 +2,7 @@ import torch
 from pokerkit import NoLimitTexasHoldem, Automation
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import Action
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT
 from src.game_registry import get_current_game_config
 
 
@@ -107,7 +107,7 @@ class HumanAIPokerManager:
         if "raw_starting_stacks" in table_params:
             table_params["raw_starting_stacks"] = stacks
 
-        from src.ppo_self_play.global_settings import GAME_TYPE
+        from src.global_settings import GAME_TYPE
         if GAME_TYPE == "KUHN":
             self.state = PokerkitGame.create_state(pokerkit_automations)
         else:

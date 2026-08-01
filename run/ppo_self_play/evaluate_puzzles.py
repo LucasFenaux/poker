@@ -15,8 +15,8 @@ from src.state_interpreter import StateSnapshot
 
 from src.action_interpreter import Action
 from evaluate import get_latest_run_folder
-from src.ppo_self_play.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
+from src.global_settings import IS_RECURRENT
 
 
 @dataclass

@@ -7,7 +7,7 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 import pokerkit
 from torch.nn import ModuleList
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT
 from src.state_interpreter import StateSnapshot
 from src.game_registry import get_current_game_config
 

@@ -6,10 +6,10 @@ from ray.util.queue import Queue, Empty
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from src.ppo_self_play.alg import PPO, RNNPPO
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.alg import PPO, RNNPPO
+from src.global_settings import IS_RECURRENT
 from src.game_registry import get_current_game_hyperparameters
-from src.ppo_self_play.scheduler import HistoricalSampling
+from src.self_play.scheduler import HistoricalSampling
 
 
 @ray.remote(num_cpus=1)

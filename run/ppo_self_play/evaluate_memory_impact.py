@@ -4,13 +4,12 @@ import random
 import torch
 import numpy as np
 from scipy import stats
-from pokerkit import NoLimitTexasHoldem, Automation
 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.game_registry import get_current_game_config
-from src.ppo_self_play.alg import RNNPPO, RNNPPOInferenceWrapper
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.alg import RNNPPO, RNNPPOInferenceWrapper
+from src.global_settings import IS_RECURRENT
 from evaluate import FastBaselineBot, get_latest_run_folder, get_valid_actions_dict
 
 

@@ -7,10 +7,10 @@ from ray.util.queue import Empty
 import torch
 import asyncio
 
-from src.ppo_self_play.global_settings import (MAX_TABLE_SIZE, HISTORY_LOG_WIDTH, USE_HISTORICAL_SAMPLING,
-                                               HISTORICAL_SAMPLING_RATE, HISTORY_BURN_IN, IS_RECURRENT)
+from src.global_settings import (MAX_TABLE_SIZE, HISTORY_LOG_WIDTH, USE_HISTORICAL_SAMPLING,
+                             HISTORICAL_SAMPLING_RATE, HISTORY_BURN_IN, IS_RECURRENT)
 from src.player_ai import PlayerAI, RNNPlayerAI
-from src.ppo_self_play.alg import PPO, RNNPPO
+from src.alg import PPO, RNNPPO
 
 
 class JITTableScheduler:
@@ -144,8 +144,8 @@ class HistoricalSampling:
         import os
         import torch
         from src.player_ai import PlayerAI, RNNPlayerAI
-        from src.ppo_self_play.alg import PPO, RNNPPO
-        from src.ppo_self_play.global_settings import IS_RECURRENT
+        from src.alg import PPO, RNNPPO
+        from src.global_settings import IS_RECURRENT
         import json
         
         counts_path = os.path.join(self.player_save_folder, "sampling_counts.json")

@@ -9,7 +9,7 @@ from src.game_registry import get_current_game_config
 from src.action_interpreter import to_exact_fraction, Action
 from src.state_interpreter import extract_state_snapshot
 from src.baseline_model import FastBaselineBot, get_valid_actions_dict
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT
 
 CHUNK_SIZE = 100
 
@@ -331,6 +331,6 @@ def generate_data(save_folder: str, num_games=100_000, num_workers=4, model_mode
 
 
 if __name__ == '__main__':
-    from src.ppo_self_play.global_settings import GAME_TYPE
+    from src.global_settings import GAME_TYPE
     save_folder = f"./data/{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}/"
     generate_data(save_folder, num_workers=4)

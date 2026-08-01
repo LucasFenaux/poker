@@ -8,21 +8,21 @@ from ray.util.queue import Queue, Empty
 import os
 import torch
 
-from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT
-from src.ppo_self_play.alg import PPO, RNNPPO
-from src.ppo_self_play.trainer_actor import TrainerActor
-from src.game_registry import get_current_game_config
-from src.ppo_self_play.leaderboard_actor import LeaderboardActor
-from src.ppo_self_play.data_storage import DataStorage
+from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT
+from src.alg import PPO, RNNPPO
+from src.self_play.trainer_actor import TrainerActor
+from src.self_play.leaderboard_actor import LeaderboardActor
+from src.self_play.data_storage import DataStorage
 from src.player_ai import PlayerAI, RNNPlayerAI
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
-from src.ppo_self_play.scheduler import JITTableScheduler, HistoricalSampling
+from src.self_play.scheduler import JITTableScheduler, HistoricalSampling
 
 
 class CasinoManager:
     def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
                  bc_pretrained_model_path: str = None, resume: bool = False):
+        from src.game_registry import get_current_game_config
         try:
             self.player_ids = list(range(NUM_PLAYERS))
             self.device = device
@@ -146,8 +146,8 @@ class CasinoManager:
             print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
                   f"{self.table_max_size}...")
             self.table_ids = [table_id for table_id in range(NUM_TABLES)]
-            TableActor = get_current_game_config()['table_actor']
-            self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
+            self.TableActor = get_current_game_config()['table_actor']
+            self.tables = [self.TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                              self.historical_sampling_receive_queue,
                                              self.table_max_size, discrete, self.mode,
                                              self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
@@ -358,8 +358,8 @@ class CasinoManager:
                     table_id += 1
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
-                TableActor = get_current_game_config()['table_actor']
-                new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
+                self.TableActor = get_current_game_config()['table_actor']
+                new_table = self.TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
                                       self.table_max_size, self.discrete, self.mode, self.batch_size)
                 self.tables.append(new_table)
                 new_table.start.remote()
@@ -371,6 +371,7 @@ class CasinoManager:
             return queue_empty
 
     def start_casino(self):
+        from src.game_registry import get_current_game_config
         print(f"Casino Starting")
 
         while (not self.stop_event.is_set()):  # keep running the casino forever
@@ -444,6 +445,7 @@ class CasinoManager:
         print("Casino cleaning up and shutting down...")
 
     def old_start_casino(self):
+        from src.game_registry import get_current_game_config
         print(f"Casino Starting")
 
         while (not self.stop_event.is_set()):   # keep running the casino forever

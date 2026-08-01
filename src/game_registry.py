@@ -1,6 +1,6 @@
 import importlib
 from pokerkit import NoLimitTexasHoldem, KuhnPoker, Automation
-from src.ppo_self_play.global_settings import GAME_TYPE, IS_RECURRENT
+from src.global_settings import GAME_TYPE, IS_RECURRENT
 
 
 def get_holdem_table_params(table_size, **kwargs):
@@ -40,10 +40,10 @@ GAME_REGISTRY = {
         "min_bb_ratio": 2,
         "max_bb_ratio": 2,
         "min_allowed_start_bb": 10,
-        "action_interpreter_path": "src.action_interpreter.HoldemActionInterpreter",
-        "state_preprocessor_path": "src.state_interpreter.HoldemStatePreprocessor",
-        "state_interpreter_path": "src.state_interpreter.HoldemStateInterpreter",
-        "table_actor_path": "src.ppo_self_play.table_actor.HoldemTableActor",
+        # "action_interpreter_path": "src.action_interpreter.HoldemActionInterpreter",
+        # "state_preprocessor_path": "src.state_interpreter.HoldemStatePreprocessor",
+        # "state_interpreter_path": "src.state_interpreter.HoldemStateInterpreter",
+        # "table_actor_path": "src.table_actor.holdem.HoldemTableActor",
         "pokerkit_game": NoLimitTexasHoldem,
         "pokerkit_automations": (
             Automation.ANTE_POSTING, Automation.BET_COLLECTION, Automation.BLIND_OR_STRADDLE_POSTING,
@@ -61,10 +61,10 @@ GAME_REGISTRY = {
         "min_bb_ratio": 1,
         "max_bb_ratio": 1,
         "min_allowed_start_bb": 1,
-        "action_interpreter_path": "src.action_interpreter.KuhnActionInterpreter",
-        "state_preprocessor_path": "src.state_interpreter.KuhnStatePreprocessor",
-        "state_interpreter_path": "src.state_interpreter.KuhnStateInterpreter",
-        "table_actor_path": "src.ppo_self_play.table_actor.KuhnTableActor",
+        # "action_interpreter_path": "src.action_interpreter.KuhnActionInterpreter",
+        # "state_preprocessor_path": "src.state_interpreter.KuhnStatePreprocessor",
+        # "state_interpreter_path": "src.state_interpreter.KuhnStateInterpreter",
+        # "table_actor_path": "src.table_actor.kuhn.KuhnTableActor",
         "pokerkit_game": KuhnPoker,
         "pokerkit_automations": (
             Automation.ANTE_POSTING, Automation.BET_COLLECTION, Automation.BLIND_OR_STRADDLE_POSTING,
@@ -106,13 +106,21 @@ def get_current_game_config():
     
     config = GAME_REGISTRY[GAME_TYPE]
     
+    from src.state_interpreter import get_state_preprocessor_class, get_state_interpreter_class
+    from src.action_interpreter import get_action_interpreter_class
+    from src.table_actor import get_table_actor_class
+
     return {
         "action_size": config["action_size"],
         "num_decisions": config["num_decisions"],
-        "action_interpreter": get_class_from_path(config["action_interpreter_path"]),
-        "state_preprocessor": get_class_from_path(config["state_preprocessor_path"]),
-        "state_interpreter": get_class_from_path(config["state_interpreter_path"]),
-        "table_actor": get_class_from_path(config["table_actor_path"]),
+        # "action_interpreter": get_class_from_path(config["action_interpreter_path"]),
+        "action_interpreter": get_action_interpreter_class(),
+        # "state_preprocessor": get_class_from_path(config["state_preprocessor_path"]),
+        "state_preprocessor": get_state_preprocessor_class(),
+        # "state_interpreter": get_class_from_path(config["state_interpreter_path"]),
+        "state_interpreter": get_state_interpreter_class(),
+        # "table_actor": get_class_from_path(config["table_actor_path"]),
+        "table_actor": get_table_actor_class(),
         "pokerkit_game": config["pokerkit_game"],
         "pokerkit_automations": config["pokerkit_automations"],
         "table_param_generator": config["table_param_generator"],

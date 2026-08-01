@@ -25,7 +25,7 @@ class FastBaselineBot:
         self.player_index = new_index
 
     def get_action(self, state: State, valid_actions: dict) -> tuple[str, float]:
-        from src.ppo_self_play.global_settings import GAME_TYPE
+        from src.global_settings import GAME_TYPE
         
         # If it's a non-Holdem game like Kuhn, use a simple random baseline for now 
         # (since Holdem equity calculations will crash on Kuhn cards)
