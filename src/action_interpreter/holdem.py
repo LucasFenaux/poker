@@ -2,16 +2,16 @@ import math
 import torch.nn as nn
 from src.action_interpreter.action_interpreter import Action, to_exact_fraction, ActionInterpreter
 
-class HoldemActionInterpreter(ActionInterpreter):
+class ContinuousHoldemActionInterpreter(ActionInterpreter):
 
     def __init__(self, mode="beta"):
-        super(HoldemActionInterpreter, self).__init__(mode)
+        super(ContinuousHoldemActionInterpreter, self).__init__(mode)
         if mode == "beta":
             self.squashing_fn = nn.Identity()
         elif mode == "normal":
             self.squashing_fn = nn.Sigmoid()
 
-    def forward(self, x, min_bet, max_bet):
+    def forward(self, x, min_bet, max_bet, pot_size=None):
         # assume x is a potentially batched tensor whose last dimension is 2
         assert x.shape[-1] == 2
         assert len(x.shape) <= 2
@@ -48,5 +48,65 @@ class HoldemActionInterpreter(ActionInterpreter):
             action = [Action.decide_action(v) for v in x[:, 0]]
             bet_sizing = self.squashing_fn(x[:, 1])
             bet_sizing = [bet_size_scaling(v.item()) for v in bet_sizing]
+
+        return action, bet_sizing
+
+
+class DiscreteHoldemBetActions:
+    MIN_BET = 0
+    THIRD_POT = 1
+    HALF_POT = 2
+    TWO_THIRD_POT = 3
+    POT = 4
+    ALL_IN = 5
+    NUM_BETTING_SIZES = 6
+
+    @classmethod
+    def decide_action(cls, action):
+        if hasattr(action, "item"):
+            val = action.item()
+        else:
+            val = action
+        return cls(int(val))
+
+    @staticmethod
+    def compute_bet(action, min_bet, max_bet, pot_size):
+        action = Action.decide_action(action)
+        if action == DiscreteHoldemBetActions.MIN_BET:
+            return min_bet
+        elif action == DiscreteHoldemBetActions.THIRD_POT:
+            return to_exact_fraction(min(max_bet, max(min_bet, pot_size/3)))
+        elif action == DiscreteHoldemBetActions.HALF_POT:
+            return to_exact_fraction(min(max_bet, max(min_bet, pot_size/2)))
+        elif action == DiscreteHoldemBetActions.TWO_THIRD_POT:
+            return to_exact_fraction(min(max_bet, max(min_bet, 2*pot_size/3)))
+        elif action == DiscreteHoldemBetActions.TWO_THIRD_POT:
+            return to_exact_fraction(min(max_bet, max(min_bet, pot_size)))
+        elif action == DiscreteHoldemBetActions.ALL_IN:
+            return max_bet
+        else:
+            raise NotImplementedError
+
+
+class DiscreteHoldemActionInterpreter(ActionInterpreter):
+
+    def __init__(self, mode="beta"):
+        super(DiscreteHoldemActionInterpreter, self).__init__(mode)
+        if mode == "beta":
+            self.squashing_fn = nn.Identity()
+        elif mode == "normal":
+            self.squashing_fn = nn.Sigmoid()
+
+    def forward(self, x, min_bet, max_bet, pot_size):
+        # assume x is a potentially batched tensor whose last dimension is 2
+        assert x.shape[-1] == 2
+        assert len(x.shape) <= 2
+
+        if len(x.shape) == 1:
+            action = Action.decide_action(x[0])
+            bet_sizing = DiscreteHoldemBetActions.compute_bet(x[1], min_bet, max_bet, pot_size)
+        else:
+            action = [Action.decide_action(v) for v in x[:, 0]]
+            bet_sizing = [DiscreteHoldemBetActions.compute_bet(v, min_bet, max_bet, pot_size) for v in x[:, 1]]
 
         return action, bet_sizing

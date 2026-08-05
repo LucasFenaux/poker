@@ -80,18 +80,22 @@ class TrainerActor:
             batch_size = len(data_batch["rewards"])  # NOTE: in the case of RNN model, this is the number of games, no number of transitions. [GAMES[Transitions]]
             # trainer metrics
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Loss", metrics["loss"], self.num_training_ran)
-            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)
+            if "entropy_loss" in metrics:
+                self.writer.add_scalar(f"Trainer_{self.trainer_id}/Entropy_Loss", metrics["entropy_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Policy_Loss", metrics["policy_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Value_Loss", metrics["value_loss"], self.num_training_ran)
             self.writer.add_scalar(f"Trainer_{self.trainer_id}/Batch_Size", batch_size, self.num_training_ran)
-            self.writer.add_scalar(f"Trainer_{self.trainer_id}/Weight_L2_Change", metrics["weight_l2_change"], self.num_training_ran)
+            if "weight_l2_change" in metrics:
+                self.writer.add_scalar(f"Trainer_{self.trainer_id}/Weight_L2_Change", metrics["weight_l2_change"], self.num_training_ran)
 
             self.writer.add_scalar(f"Player_{player_id}/Policy_Loss", metrics["policy_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Value_Loss", metrics["value_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Loss", metrics["loss"], player_training_count)
-            self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
+            if "entropy_loss" in metrics:
+                self.writer.add_scalar(f"Player_{player_id}/Entropy_Loss", metrics["entropy_loss"], player_training_count)
             self.writer.add_scalar(f"Player_{player_id}/Batch_Size", batch_size, player_training_count)
-            self.writer.add_scalar(f"Player_{player_id}/Weight_L2_Change", metrics["weight_l2_change"], player_training_count)
+            if "weight_l2_change" in metrics:
+                self.writer.add_scalar(f"Player_{player_id}/Weight_L2_Change", metrics["weight_l2_change"], player_training_count)
             if "update_count" in metrics:
                 self.writer.add_scalar(f"Player_{player_id}/Update_Count", metrics["update_count"], player_training_count)
             if "grad_norm" in metrics:

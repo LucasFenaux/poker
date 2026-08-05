@@ -38,11 +38,12 @@ def preprocess_raw_states(states_list, actors_list, device):
 
 
 class PokerModel(nn.Module):
-    def __init__(self, interpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str, return_logits: bool = False):
         super(PokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
+        self.return_logits = return_logits
 
         self.embed_net = nn.Sequential(
             nn.Linear(self.input_dim, 256), nn.GELU(),
@@ -74,6 +75,12 @@ class PokerModel(nn.Module):
                 if not self.deterministic:
                     self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
                     nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
+            elif self.mode == "categorical":
+                # deterministic and categorical -> categorical
+                # need to get the number of discrete actions
+                num_betting_sizes = get_current_game_config()['action_map'].NUM_BETTING_SIZES
+                self.bet_sizing_net.append(nn.Linear(64, num_betting_sizes))
+                nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
             else:
                 raise NotImplementedError(self.mode)
 
@@ -112,6 +119,16 @@ class PokerModel(nn.Module):
             dist = Normal(mu, std)
             return dist
 
+    def _forward_categorical(self, feature_vector: torch.Tensor):
+        logits = self.bet_sizing_net[0](self.embed_net(feature_vector))
+        if self.return_logits:
+            return logits
+        if self.deterministic:
+            return torch.argmax(logits, dim=1)
+        else:
+            dist = Categorical(logits=logits)
+            return dist
+
     def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor, dict],
                 current_actor: Union[int, list[int]] = None):
         # 1. Handle perfectly preprocessed dictionaries (From train.py / alg.py)
@@ -144,6 +161,8 @@ class PokerModel(nn.Module):
                 bet_sizing_dist = self._forward_normal(feature_vector)
             elif self.mode == "beta":
                 bet_sizing_dist = self._forward_beta(feature_vector)
+            elif self.mode == "categorical":
+                bet_sizing_dist = self._forward_categorical(feature_vector)
             else:
                 raise NotImplementedError
         else:
@@ -380,21 +399,21 @@ def get_value_model(device: torch.device) -> Union[ValueModel, HierarchicalValue
         return ValueModel(interpreter).to(device)
 
 
-def load_model(player_id, device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+def load_model(player_id, device, deterministic=False, mode="beta", return_logits: bool = False) -> Union[PokerModel, HierarchicalPokerModel]:
     StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
-        model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)
+        model = HierarchicalPokerModel(interpreter, deterministic, mode, return_logits).to(device)
     else:
-        model = PokerModel(interpreter, deterministic, mode).to(device)
+        model = PokerModel(interpreter, deterministic, mode, return_logits).to(device)
     return model
 
 
-def load_dummy_model(device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+def load_dummy_model(device, deterministic=False, mode="beta", return_logits: bool = False) -> Union[PokerModel, HierarchicalPokerModel]:
     StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
-        model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)
+        model = HierarchicalPokerModel(interpreter, deterministic, mode, return_logits).to(device)
     else:
-        model = PokerModel(interpreter, deterministic, mode).to(device)
+        model = PokerModel(interpreter, deterministic, mode, return_logits).to(device)
     return model

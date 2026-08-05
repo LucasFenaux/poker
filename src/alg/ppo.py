@@ -8,7 +8,6 @@ from torch.distributions import Categorical, Normal
 import pokerkit
 from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
-from src.state_interpreter import safe_log, safe_lin_sqrt
 from .alg import OnPolicyAlgorithm, InferenceWrapper
 
 

@@ -6,9 +6,11 @@ import os
 # 4 tables
 # 2 trainers
 GAME_TYPES=["HOLDEM", "KUHN"]
+ALG_TYPES=["PPO", "NEURD"]
 # NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
 # GAME_TYPE="HOLDEM"
 GAME_TYPE="KUHN"
+ALG="PPO"
 NUM_CPUS=os.environ.get("RAY_NUM_CPUS",10)
 NUM_GPUS=0
 IS_RECURRENT=True

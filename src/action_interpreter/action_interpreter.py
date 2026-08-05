@@ -27,5 +27,5 @@ class ActionInterpreter(ABC, nn.Module):
         self.mode = mode
 
     @abstractmethod
-    def forward(self, x, min_bet, max_bet):
+    def forward(self, x, min_bet, max_bet, pot_size):
         pass

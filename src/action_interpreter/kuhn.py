@@ -3,7 +3,7 @@ from src.global_settings import GAME_TYPE
 
 
 class KuhnActionInterpreter(ActionInterpreter):
-    def forward(self, x, min_bet, max_bet):
+    def forward(self, x, min_bet, max_bet, pot_size=None):
         expected_size = 1 if GAME_TYPE == "KUHN" else 2
 
         if x.dim() == 0:

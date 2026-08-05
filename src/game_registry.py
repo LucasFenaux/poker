@@ -124,6 +124,7 @@ def get_current_game_config():
         "pokerkit_game": config["pokerkit_game"],
         "pokerkit_automations": config["pokerkit_automations"],
         "table_param_generator": config["table_param_generator"],
+        "action_map": config["action_map"],
         "min_stack": config["min_stack"],
         "max_stack": config["max_stack"],
         "min_bb_ratio": config["min_bb_ratio"],
