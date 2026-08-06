@@ -13,7 +13,7 @@ class KuhnTable(HoldemTable):
                  model_mode: str, batch_size: int, log_folder: str):
         super().__init__(table_id, device, in_queue, out_queue, historical_sampling_receive_queue,
                          max_table_size, discrete, model_mode, batch_size, log_folder)
-        self.linear_replay = 1  # less replay since we quickly hit the batch limit
+        self.replay = 100   # since games are so quick
 
     def _play_tree_round(self):
         from pokerkit import KuhnPoker

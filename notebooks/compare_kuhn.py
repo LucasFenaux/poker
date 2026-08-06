@@ -7,8 +7,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
 
 from src.state_interpreter import StateSnapshot
-from src.alg import PPO, RNNPPO, PPOInferenceWrapper, RNNPPOInferenceWrapper
-from src.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT, ALG
+from src.game_registry import get_current_game_config
 
 from src.vanilla_cfr.kuhn_poker_solve import Node, Player, cfr_traversal
 
@@ -44,12 +44,15 @@ def color_prob(ppo_prob: float, cfr_prob: float) -> str:
     return f"\033[38;2;{r};{g};{b}m{label}{_RESET}"
 
 def load_eval_models(model_path, device):
-    if IS_RECURRENT:
-        policy_net, value_net = RNNPPO.init_networks(device, mode="beta", discrete=False)
-        wrapper = RNNPPOInferenceWrapper((policy_net,), discrete=False)
-    else:
-        policy_net, value_net = PPO.init_networks(device, mode="beta", discrete=False)
-        wrapper = PPOInferenceWrapper((policy_net,), discrete=False)
+    config = get_current_game_config()
+    alg_class = config["alg"]
+    wrapper_class = config["inference_wrapper"]
+    
+    discrete = True if ALG == "NEURD" else False
+    mode = "categorical" if ALG == "NEURD" else "beta"
+    
+    policy_net, value_net = alg_class.init_networks(device, mode=mode, discrete=discrete)
+    wrapper = wrapper_class((policy_net,), discrete=discrete)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
 
@@ -75,10 +78,7 @@ def load_eval_models(model_path, device):
         except ValueError:
             pass
 
-    if IS_RECURRENT:
-        wrapper.load_params(checkpoint)
-    else:
-        wrapper.load_params((checkpoint[0],))
+    wrapper.load_params(checkpoint)
     wrapper.to(device)
 
     value_net.load_state_dict(checkpoint[1])
@@ -139,7 +139,7 @@ def get_latest_run_folder():
     runs = glob.glob(os.path.join(project_root, "results", "run_KUHN_*"))
     if not runs:
         return None
-    runs.sort(key=os.path.getmtime)
+    runs.sort()
     return runs[-1]
 
 def evaluate():
@@ -167,12 +167,14 @@ def evaluate():
     # def get_flat_weights(wrapper):
     #     return torch.cat([p.view(-1) for p in wrapper.network.parameters() if p.requires_grad])
     #
-    # if IS_RECURRENT:
-    #     dummy_policy, _ = RNNPPO.init_networks(device, mode="beta", discrete=False)
-    #     dummy_wrapper = RNNPPOInferenceWrapper((dummy_policy,), discrete=False)
-    # else:
-    #     dummy_policy, _ = PPO.init_networks(device, mode="beta", discrete=False)
-    #     dummy_wrapper = PPOInferenceWrapper((dummy_policy,), discrete=False)
+    #     config = get_current_game_config()
+    #     alg_class = config["alg"]
+    #     wrapper_class = config["inference_wrapper"]
+    #     discrete = True if ALG == "NEURD" else False
+    #     mode = "categorical" if ALG == "NEURD" else "beta"
+    #
+    #     dummy_policy, _ = alg_class.init_networks(device, mode=mode, discrete=discrete)
+    #     dummy_wrapper = wrapper_class((dummy_policy,), discrete=discrete)
     #
     # dummy_weights = get_flat_weights(dummy_wrapper)
     #
@@ -246,10 +248,25 @@ def evaluate():
 
     specific_model_id = "46"  # Set this to any current model ID to add a dedicated column for it
 
+    import math
+    from src.global_settings import HISTORY_LOG_WIDTH
+
+    def get_exp_weight(is_curr, ver, m_id):
+        if ver <= 0:
+            return 1.0
+        if is_curr:
+            return 1.0
+        try:
+            k = int(math.log(ver, HISTORY_LOG_WIDTH))
+            return float(HISTORY_LOG_WIDTH ** k)
+        except ValueError:
+            return 1.0
+
     weighting_schemes = {
         "Equal": lambda is_curr, ver, m_id: 1.0,
         "Linear": lambda is_curr, ver, m_id: float(ver),
         "Quad": lambda is_curr, ver, m_id: float(ver) ** 2,
+        "Exp": get_exp_weight,
         "Current": lambda is_curr, ver, m_id: 1.0 if is_curr else 0.0,
     }
     
@@ -278,10 +295,11 @@ def evaluate():
         scheme_probs[scheme_name] = agg
 
     num_models = len(model_evaluations)
-    print("\nWeighting Schemes:")
+    print("Weighting Schemes:")
     print("  - Equal:   All models (current and historical) weighted equally (w = 1)")
     print("  - Linear:  Weighted proportionally to training step / recency (w = version)")
     print("  - Quad:    Weighted proportionally to squared training step (w = version²)")
+    print("  - Exp:     Weighted by the inverse of historical log-sampling rate (w = W^floor(log_W(v)))")
     print("  - Current: Only current pool models (historical checkpoints excluded)")
     if specific_model_id is not None:
         print(f"  - P{specific_model_id}:      Only evaluates current model ID {specific_model_id}")

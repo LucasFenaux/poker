@@ -41,8 +41,7 @@ class HoldemTable(BaseTable):
         # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
-        self.replay = 1  # not really necessary with tree game. Useful with linear game.
-        self.linear_replay = 10
+        self.replay = 1  if self.mode == "tree" else 10
         self.tree_expansion = 3  # good options are 3, 4, 5
         self.max_acceptable_game_length = 1000
         self.use_early_stopping = True
@@ -645,7 +644,7 @@ class HoldemTable(BaseTable):
                     }
                     session_player_winnings = {pid: 0.0 for pid in regular_player_ids}
 
-                    for _ in range(self.linear_replay if IS_RECURRENT else self.replay):
+                    for _ in range(self.replay):
                         shuffle = list(range(len(player_ids)))
                         random.shuffle(shuffle)
                         # shuffled_player_params_list = [player_params_list[i] for i in shuffle]

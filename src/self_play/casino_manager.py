@@ -108,7 +108,7 @@ class CasinoManager:
             if IS_RECURRENT:
                 # number of games
                 # self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
-                self.batch_size = 10 if RESOURCE_LIMITED else 80
+                self.batch_size = 250 if RESOURCE_LIMITED else 2_000   # kuhn poker has ~2 transitions per game
             else:
                 # number of transitions
                 if GAME_TYPE == "KUHN":
