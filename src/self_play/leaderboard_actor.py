@@ -84,7 +84,7 @@ class LeaderboardActor:
 
                 if data is not None:
                     # print("updating")
-                    (player_id, player_winnings, num_tables, num_trainers, is_playing, is_training, is_playing_against,
+                    (winnings_batch, num_tables, num_trainers, is_playing, is_training, is_playing_against,
                      player_dispatch_times, historical_players_used, num_historical_checkpoints) = data
                     self.num_tables = num_tables
                     self.num_trainers = num_trainers
@@ -95,7 +95,8 @@ class LeaderboardActor:
                     self.historical_players_used = historical_players_used
                     self.num_historical_checkpoints = num_historical_checkpoints
 
-                    self.update(player_id, player_winnings)
+                    for p_id, p_winnings in winnings_batch:
+                        self.update(p_id, p_winnings)
 
                 await asyncio.sleep(0)
             # except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!

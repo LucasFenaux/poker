@@ -175,6 +175,10 @@ class CasinoManager:
                 self.trainer_receive_queue, self.player_ids, save_folder)
 
             self.leaderboard.start.remote()
+            self.leaderboard_timer = time.time()
+            self.leaderboard_refresh = 2  # two second refresh cap to not overload the main thread
+            self.winnings_buffer = []
+
             # min and max stack params are defined in terms of # of big blinds
             config = get_current_game_config()
             self.min_stack = config["min_stack"]
@@ -308,11 +312,15 @@ class CasinoManager:
 
                     self.data_storage.add(player_id, hand_info, num_samples)
 
+                self.winnings_buffer.append((player_id, player_winnings))
                 # send the player_winnings to the leaderboard
-                self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
-                                                   self.is_playing, self.is_training, self.is_playing_against,
-                                                   self.player_dispatch_times, self.table_scheduler.historical_players_used,
-                                                   self.historical_sampler.len.remote()))
+                if time.time() - self.leaderboard_timer >= self.leaderboard_refresh:  # refresh every 2 second
+                    self.leaderboard_queue.put_nowait((self.winnings_buffer, len(self.table_ids), len(self.trainer_ids),
+                                                       self.is_playing, self.is_training, self.is_playing_against,
+                                                       self.player_dispatch_times, self.table_scheduler.historical_players_used,
+                                                       self.historical_sampler.len.remote()))
+                    self.winnings_buffer = []
+                    self.leaderboard_timer = time.time()
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]

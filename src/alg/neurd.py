@@ -209,9 +209,14 @@ class NeuRD(OnPolicyAlgorithm):
 
         with torch.no_grad():
             action_logits, bet_logits = self.get_model_logits(self.network, states)
+            action_hist = Categorical(logits=action_logits).sample().float()
+            if bet_logits is not None:
+                bet_hist = Categorical(logits=bet_logits).sample().float()
+            else:
+                bet_hist = None
 
         return {"loss": policy_loss, "value_loss": value_loss, "policy_loss": policy_loss,
-                "action_hist": action_logits, "betting_size": bet_logits, "rewards": batch_rewards,
+                "action_hist": action_hist, "betting_size": bet_hist, "rewards": batch_rewards,
                 "update_count": count,}
 
 
