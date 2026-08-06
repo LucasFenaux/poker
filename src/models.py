@@ -87,12 +87,15 @@ class PokerModel(nn.Module):
             self.use_bet_sizing_net = True
 
     def _forward_action(self, feature_vector: torch.Tensor):
-        action = self.action_net(feature_vector)
+        feature_embedding = self.embed_net(feature_vector)
 
+        logits = self.action_net(feature_embedding)
+        if self.return_logits:
+            return logits
         if self.deterministic:
-            return action
+            return torch.argmax(logits, dim=-1)
 
-        dist = Categorical(logits=action)
+        dist = Categorical(logits=logits)
         return dist
 
     def _forward_beta(self, feature_vector: torch.Tensor):
@@ -208,7 +211,7 @@ class ValueModel(nn.Module):
 
 
 class HierarchicalPokerModel(nn.Module):
-    def __init__(self, interpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str, return_logits: bool=False):
         super(HierarchicalPokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()

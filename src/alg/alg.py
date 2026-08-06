@@ -27,7 +27,7 @@ class BaseAlgorithm:
 
 
 class OnPolicyAlgorithm(BaseAlgorithm):
-    def __init__(self, lr, device):
+    def __init__(self, lr, device, mode=None, discrete=True):
         super().__init__(lr, device)
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states = None, *args, **kwargs):

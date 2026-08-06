@@ -107,7 +107,7 @@ def get_current_game_config():
     config = GAME_REGISTRY[GAME_TYPE]
     
     from src.state_interpreter import get_state_preprocessor_class, get_state_interpreter_class
-    from src.action_interpreter import get_action_interpreter_class
+    from src.action_interpreter import get_action_interpreter_class, get_bet_action_map_class
     from src.table_actor import get_table_actor_class
     from src.alg import get_alg_class, get_inference_wrapper_class
 
@@ -127,7 +127,7 @@ def get_current_game_config():
         "pokerkit_game": config["pokerkit_game"],
         "pokerkit_automations": config["pokerkit_automations"],
         "table_param_generator": config["table_param_generator"],
-        "action_map": config["action_map"],
+        "action_map": get_bet_action_map_class(),
         "min_stack": config["min_stack"],
         "max_stack": config["max_stack"],
         "min_bb_ratio": config["min_bb_ratio"],

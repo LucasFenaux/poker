@@ -107,7 +107,8 @@ class TrainerActor:
                 for action_idx, count in zip(unique_actions, counts):
                     freq = (count.item() / total_actions) * 100.0
                     self.writer.add_scalar(f"Player_{player_id}/Action_{int(action_idx.item())}_Freq_%", freq, player_training_count)
-            self.writer.add_histogram(f"Player_{player_id}/Betting_Size", metrics["betting_size"], player_training_count)
+            if metrics.get("betting_size") is not None:
+                self.writer.add_histogram(f"Player_{player_id}/Betting_Size", metrics["betting_size"], player_training_count)
             self.writer.add_histogram(f"Player_{player_id}/Rewards", metrics["rewards"], player_training_count)
 
             if self.mode == "beta":
@@ -134,8 +135,7 @@ class TrainerActor:
             return new_weights, new_optimizer_params
         except Exception as e:
             print(f"Exception: {e} encountered in Trainer {self.trainer_id} training player: {player_id}")
-            if self.trainer_id == 0:
-                traceback.print_exc()
+            traceback.print_exc()
             # abort training and send back the original weights
             message = {
                 "type": "player",

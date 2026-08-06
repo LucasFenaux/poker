@@ -19,12 +19,17 @@ class NeuRD(OnPolicyAlgorithm):
         "grad_clip_norm": 0.5,
         "reward_normalization_scaler": 1,
     }
-    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size):
+    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical",
+                 discrete=True):
         super(NeuRD, self).__init__(lr, device)
         self.mini_batch_size =mini_batch_size
         self.value_lr = value_lr
         self.grad_clip_norm = grad_clip_norm
-        network, value_network = self.init_networks(device, True, "logits")
+        self.mode = mode
+        self.discrete = discrete
+        assert self.mode == "categorical"  # only mode supported for neurd
+        assert self.discrete   # does not support continuous actions
+        network, value_network = self.init_networks(device, discrete, mode)
         self.network = network
         self.value_network = value_network
         self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
@@ -165,13 +170,19 @@ class NeuRD(OnPolicyAlgorithm):
             self.optimizer.zero_grad()
 
             decision_logits, bet_logits = self.get_model_logits(self.network, mini_batch_states)
-            decision_actions = mini_batch_actions[..., 0].unsqueeze(-1)
-            bet_actions = mini_batch_actions[..., 1].unsqueeze(-1)
-            # we need to gather the logits by action since the neuRD loss is y(a, \theta)*advantage
-            decision_logits = torch.gather(decision_logits, -1, decision_actions)
-            bet_logits = torch.gather(bet_logits, -1, bet_actions)
 
-            logits = torch.cat((decision_logits, bet_logits), dim=-1)  # concatenate along the logit dimension, not the batch dim
+            if bet_logits is not None:
+                decision_actions = mini_batch_actions[..., 0].unsqueeze(-1)
+                # we need to gather the logits by action since the neuRD loss is y(a, \theta)*advantage
+                decision_logits = torch.gather(decision_logits, -1, decision_actions)
+                bet_actions = mini_batch_actions[..., 1].unsqueeze(-1)
+                bet_logits = torch.gather(bet_logits, -1, bet_actions)
+                logits = torch.cat((decision_logits, bet_logits), dim=-1)  # concatenate along the logit dimension, not the batch dim
+            else:
+                decision_actions = mini_batch_actions.unsqueeze(-1)
+                decision_logits = torch.gather(decision_logits, -1, decision_actions)
+                logits = decision_logits
+
             policy_loss = -logits * mini_batch_advantages.unsqueeze(-1)  # - for gradient ascent
 
             if sample_weights is None:
@@ -222,7 +233,7 @@ class NeuRD(OnPolicyAlgorithm):
 class NeuRDInferenceWrapper(PPOInferenceWrapper):
 
     def get_model_policy(self, network, state, hand_hidden: torch.Tensor = None,
-                   game_hidden: torch.Tensor = None):
+                         game_hidden: torch.Tensor = None):
         if isinstance(state, tuple) and len(state) == 2 and not isinstance(state[0], dict):
             s, a = state
             batched_dict = self.preprocess_batch([s], [a])
@@ -232,4 +243,7 @@ class NeuRDInferenceWrapper(PPOInferenceWrapper):
             state_args = state
 
         decision_logits, bet_logits = network(*state_args)
-        return Categorical(logits=decision_logits), Categorical(logits=bet_logits)
+        if bet_logits is not None:
+            return Categorical(logits=decision_logits), Categorical(logits=bet_logits)
+        else:
+            return Categorical(logits=decision_logits), None
