@@ -109,12 +109,12 @@ class NeuRD(OnPolicyAlgorithm):
         states = (batched_states_dict,)
 
         if isinstance(batch_actions[0], torch.Tensor):
-            actions = torch.stack(batch_actions).to(self.device).float()
+            actions = torch.stack(batch_actions).to(self.device).long()  # need long for indexing
         else:
             actions = torch.as_tensor(
                 np.array(batch_actions),
                 device=self.device,
-                dtype=torch.float32,
+                dtype=torch.long,
             )
 
         if sample_weights is not None:
@@ -145,6 +145,7 @@ class NeuRD(OnPolicyAlgorithm):
             mini_batch_states = (mini_batch_dict,)
             mini_batch_rewards = batch_rewards[mini_batch_indices]
             mini_batch_advantages = advantages[mini_batch_indices]
+            mini_batch_actions = actions[mini_batch_indices]
 
             if sample_weights is not None:
                 mini_batch_sample_weights = normalized_sample_weights[mini_batch_indices]
@@ -164,9 +165,14 @@ class NeuRD(OnPolicyAlgorithm):
             self.optimizer.zero_grad()
 
             decision_logits, bet_logits = self.get_model_logits(self.network, mini_batch_states)
-            # logits are B x
+            decision_actions = mini_batch_actions[..., 0].unsqueeze(-1)
+            bet_actions = mini_batch_actions[..., 1].unsqueeze(-1)
+            # we need to gather the logits by action since the neuRD loss is y(a, \theta)*advantage
+            decision_logits = torch.gather(decision_logits, -1, decision_actions)
+            bet_logits = torch.gather(bet_logits, -1, bet_actions)
+
             logits = torch.cat((decision_logits, bet_logits), dim=-1)  # concatenate along the logit dimension, not the batch dim
-            policy_loss = logits * advantages
+            policy_loss = -logits * mini_batch_advantages.unsqueeze(-1)  # - for gradient ascent
 
             if sample_weights is None:
                 policy_loss = policy_loss.mean()
@@ -212,16 +218,6 @@ class NeuRD(OnPolicyAlgorithm):
         logits = network(*state_args)
         return logits
 
-    # def get_model_policy(self, network, state, hand_hidden: torch.Tensor = None,
-    #                game_hidden: torch.Tensor = None) -> Categorical:
-    #     logits = self.get_model_logits(network, state, hand_hidden, game_hidden)
-    #     return Categorical(logits=logits)
-    #
-    # def get_action(self, state: (pokerkit.State, int), hand_hidden: torch.Tensor = None,
-    #                game_hidden: torch.Tensor = None):
-    #     dist = self.get_model_policy(network, state, hand_hidden, game_hidden)
-    #     return dist.sample().cpu().squeeze(0)
-
 
 class NeuRDInferenceWrapper(PPOInferenceWrapper):
 
@@ -236,4 +232,4 @@ class NeuRDInferenceWrapper(PPOInferenceWrapper):
             state_args = state
 
         decision_logits, bet_logits = network(*state_args)
-        return Categorical(logits=decision_logits), Categorical(bet_logits)
+        return Categorical(logits=decision_logits), Categorical(logits=bet_logits)

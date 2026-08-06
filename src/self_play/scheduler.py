@@ -10,7 +10,12 @@ import asyncio
 from src.global_settings import (MAX_TABLE_SIZE, HISTORY_LOG_WIDTH, USE_HISTORICAL_SAMPLING,
                              HISTORICAL_SAMPLING_RATE, HISTORY_BURN_IN, IS_RECURRENT)
 from src.player_ai import PlayerAI, RNNPlayerAI
-from src.alg import PPO, RNNPPO
+import glob
+import os
+import torch
+from src.global_settings import IS_RECURRENT
+from src.game_registry import get_current_game_config
+import json
 
 
 class JITTableScheduler:
@@ -139,14 +144,8 @@ class HistoricalSampling:
         self.mode = mode
         self.checkpoints = {}
         self.num_checkpoints = 0
-
-        import glob
-        import os
-        import torch
-        from src.player_ai import PlayerAI, RNNPlayerAI
-        from src.alg import PPO, RNNPPO
-        from src.global_settings import IS_RECURRENT
-        import json
+        self.alg_class = get_current_game_config()["alg"]
+        self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
         
         counts_path = os.path.join(self.player_save_folder, "sampling_counts.json")
         if os.path.exists(counts_path):
@@ -168,9 +167,9 @@ class HistoricalSampling:
                 version = int(os.path.basename(f).split('_')[1].split('.')[0])
                 
                 if IS_RECURRENT:
-                    player = RNNPlayerAI(RNNPPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+                    player = RNNPlayerAI(self.alg_class.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
                 else:
-                    player = PlayerAI(PPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+                    player = PlayerAI(self.alg_class.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
                 
                 if isinstance(loaded_data, tuple) and len(loaded_data) == 2:
                     player.load_params(loaded_data[0])
@@ -279,9 +278,9 @@ class HistoricalSampling:
         # first initialize a blank player AI
 
         if IS_RECURRENT:
-            player = RNNPlayerAI(RNNPPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+            player = RNNPlayerAI(self.alg_class.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
         else:
-            player = PlayerAI(PPO.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
+            player = PlayerAI(self.alg_class.init_networks(device=torch.device("cpu"), discrete=self.discrete, mode=self.mode))
 
         player.load_params(player_state_dicts[0])
 

@@ -49,13 +49,14 @@ class CasinoManager:
             self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
             self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
             self.last_timeout_check = time.time()
-
+            self.alg_class = get_current_game_config()["alg"]
+            self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
             # we spin up the player models
             if IS_RECURRENT:
-                self.players = [ray.put(RNNPlayerAI(RNNPPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                self.players = [ray.put(RNNPlayerAI(self.alg_class.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                                 self.player_ids]
             else:
-                self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                self.players = [ray.put(PlayerAI(self.alg_class.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
                                 self.player_ids]
             self.player_training_counts = [0] * len(self.player_ids)
             

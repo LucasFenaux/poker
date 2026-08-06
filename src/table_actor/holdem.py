@@ -51,19 +51,16 @@ class HoldemTable(BaseTable):
         log_path = os.path.join(self.log_folder, "tensorboard_logs")
         self.writer = SummaryWriter(log_dir=log_path)
         self.timer = SemanticTimer()
+        self.alg_class = get_current_game_config()["alg"]
+        self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
 
         # for every parameter, we have an initial version and a game state view version as the game state evolves
         self.player_ids = None  # table facing view
         self.game_player_ids = None  # game state facing view
-        from src.alg import PPOInferenceWrapper, PPO, RNNPPOInferenceWrapper, RNNPPO
-        if IS_RECURRENT:
-            self.players = [
-                RNNPPOInferenceWrapper(RNNPPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                for _ in range(max_table_size)]
-        else:
-            self.players = [
-                PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                for _ in range(max_table_size)]
+
+        self.players = [
+            self.inference_wrapper_class(self.alg_class.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+            for _ in range(max_table_size)]
         self.game_players = self.players[:]
         self.trainable_players = None
         self.params = None
@@ -99,13 +96,8 @@ class HoldemTable(BaseTable):
                                   zip(player_ids, players)}
 
         self.player_winnings = {player_id: 0.0 for player_id in self.player_ids}
-        from src.alg import PPOInferenceWrapper, PPO, RNNPPOInferenceWrapper, RNNPPO
-        if IS_RECURRENT:
-            self.players = [RNNPPOInferenceWrapper(RNNPPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                            for _ in range(len(player_ids))]
-        else:
-            self.players = [PPOInferenceWrapper(PPO.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
-                            for _ in range(len(player_ids))]
+        self.players = [self.inference_wrapper_class(self.alg_class.init_networks(self.device, self.discrete, self.model_mode), self.discrete)
+                        for _ in range(len(player_ids))]
         self.game_players = self.players[:]
 
         for i, (player, player_params) in enumerate(zip(self.players, players_params_list)):

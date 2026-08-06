@@ -109,6 +109,7 @@ def get_current_game_config():
     from src.state_interpreter import get_state_preprocessor_class, get_state_interpreter_class
     from src.action_interpreter import get_action_interpreter_class
     from src.table_actor import get_table_actor_class
+    from src.alg import get_alg_class, get_inference_wrapper_class
 
     return {
         "action_size": config["action_size"],
@@ -120,6 +121,8 @@ def get_current_game_config():
         # "state_interpreter": get_class_from_path(config["state_interpreter_path"]),
         "state_interpreter": get_state_interpreter_class(),
         # "table_actor": get_class_from_path(config["table_actor_path"]),
+        "alg": get_alg_class(),
+        "inference_wrapper": get_inference_wrapper_class(),
         "table_actor": get_table_actor_class(),
         "pokerkit_game": config["pokerkit_game"],
         "pokerkit_automations": config["pokerkit_automations"],

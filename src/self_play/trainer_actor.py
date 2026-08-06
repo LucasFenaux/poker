@@ -6,8 +6,8 @@ from ray.util.queue import Queue, Empty
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from src.alg import PPO, RNNPPO
 from src.global_settings import IS_RECURRENT
+from src.game_registry import get_current_game_config
 from src.game_registry import get_current_game_hyperparameters
 from src.self_play.scheduler import HistoricalSampling
 
@@ -22,10 +22,13 @@ class TrainerActor:
         self.out_queue = out_queue
         self.historical_sampling_send_queue = historical_sampling_send_queue
         self.mode = mode
+        self.alg_class = get_current_game_config()["alg"]
+        self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
+
         if IS_RECURRENT:
-            self.models = PPO.init_networks(device, discrete, mode)
+            self.models = self.alg_class.init_networks(device, discrete, mode)
         else:
-            self.models = RNNPPO.init_networks(device, discrete, mode)
+            self.models = self.alg_class.init_networks(device, discrete, mode)
         self.device = device
         self.discrete = discrete
         self.num_training_ran = 0
@@ -55,19 +58,14 @@ class TrainerActor:
 
             hyperparameters = get_current_game_hyperparameters()
             # fill in any missing values with the default hyperparameters
-            if IS_RECURRENT:
-                default_hyperparameters = RNNPPO.default_hyperparameters
-            else:
-                default_hyperparameters = PPO.default_hyperparameters
+
+            default_hyperparameters = self.alg_class.default_hyperparameters
 
             for key, val in default_hyperparameters.items():
                 if not key in hyperparameters:
                     hyperparameters[key] = val
 
-            if IS_RECURRENT:
-                alg = RNNPPO(device=self.device, mode=self.mode, discrete=self.discrete, **hyperparameters)
-            else:
-                alg = PPO(device=self.device, mode=self.mode, discrete=self.discrete, **hyperparameters)
+            alg = self.alg_class(device=self.device, mode=self.mode, discrete=self.discrete, **hyperparameters)
             alg.load_params(player_state_dicts)
             if optimizer_state_dict is not None:
                 alg.load_optimizer_params(optimizer_state_dict)
