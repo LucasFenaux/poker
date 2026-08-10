@@ -14,6 +14,7 @@ class KuhnTable(HoldemTable):
         super().__init__(table_id, device, in_queue, out_queue, historical_sampling_receive_queue,
                          max_table_size, discrete, model_mode, batch_size, log_folder)
         self.replay = 100   # since games are so quick
+        self.mode = "linear"
 
     def _play_tree_round(self):
         from pokerkit import KuhnPoker
@@ -79,7 +80,7 @@ class KuhnTable(HoldemTable):
                     self.game_player_ids.append(self.game_player_ids.pop(0))
                     self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
 
-            return False
+                return True
         except Exception as e:
             print(f"Exception: {e} encountered in Table {self.table_id} in tree round fn")
             if self.table_id == 0:
@@ -118,9 +119,13 @@ class KuhnTable(HoldemTable):
                     game_memory = None
 
                 try:
-                    player_action, new_hand_memory = self._get_action(player, snapshot, current_actor,
-                                                                      hand_hidden=hand_memory,
-                                                                      game_hidden=game_memory)
+                    if IS_RECURRENT:
+                        player_action, new_hand_memory = self._get_action(player, snapshot, current_actor,
+                                                                          hand_hidden=hand_memory,
+                                                                          game_hidden=game_memory)
+                    else:
+                        player_action = self._get_action(player, snapshot, current_actor)
+                        new_hand_memory = None
                 except Exception as e:
                     print("linear_round", state)
                     if self.table_id == 0:
@@ -137,7 +142,8 @@ class KuhnTable(HoldemTable):
                 self.current_hand[player_id]["hand_memories"].append(hand_memory)
 
                 self._take_action(state, player_action)
-                self.hand_memories[player_id] = new_hand_memory
+                if IS_RECURRENT:
+                    self.hand_memories[player_id] = new_hand_memory
             if IS_RECURRENT:
                 for player, player_id in zip(self.game_players, self.game_player_ids):
                     game_memory = self.game_memories[player_id]
@@ -200,7 +206,7 @@ class KuhnTable(HoldemTable):
             self.game_player_ids.append(self.game_player_ids.pop(0))
             self.game_starting_stacks.append(self.game_starting_stacks.pop(0))
 
-            return False
+            return True
 
         except Exception as e:
             print(f"Exception: {e} encountered in Table {self.table_id} in linear round fn")

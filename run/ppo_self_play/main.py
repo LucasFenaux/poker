@@ -34,6 +34,7 @@ def get_save_folder(base_path="results"):
 if __name__ == '__main__':
     try:
         ray.init("auto", namespace="casino",
+                 runtime_env={"excludes": [".venv", "results", "data", "screenlog.0", ".git", "run_*"]}
                  )
         device = torch.device("cpu")
         
@@ -65,4 +66,6 @@ if __name__ == '__main__':
         manager.start()
         ray.shutdown()
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         ray.shutdown()

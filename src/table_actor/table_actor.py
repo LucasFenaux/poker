@@ -13,7 +13,6 @@ class BaseTable(ABC):
         "min_bet": 2,
         "raw_starting_stacks": 200,  # 200 for 100 BB
         "player_count": 2,
-        "mode": "tree"
     }
     @abstractmethod
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,

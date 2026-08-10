@@ -208,8 +208,8 @@ def evaluate():
         
     print("=========================================\n")
     
-    print("Training CFR bot for 100,000 iterations...")
-    cfr_p1, cfr_p2 = train_cfr(100_000)
+    print("Training CFR bot for 200,000 iterations...")
+    cfr_p1, cfr_p2 = train_cfr(200_000)
     
     model_evaluations = []
     from src.global_settings import GAME_TYPE
@@ -246,7 +246,7 @@ def evaluate():
                 
         model_evaluations.append((is_current, version, model_id, model_probs))
 
-    specific_model_id = "46"  # Set this to any current model ID to add a dedicated column for it
+    specific_model_id = None  # Set this to any current model ID to add a dedicated column for it
 
     import math
     from src.global_settings import HISTORY_LOG_WIDTH

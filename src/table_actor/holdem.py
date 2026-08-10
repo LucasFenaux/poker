@@ -36,19 +36,20 @@ class HoldemTable(BaseTable):
         ActionInterpreter = get_current_game_config()["action_interpreter"]
         self.action_interpreter = ActionInterpreter(model_mode)
         self.model_mode = model_mode
+        self.mode = "linear" if IS_RECURRENT else "tree"
         self.num_games_played = 0
         # number of games to play
         # when players are bad, games are quick, can have it between 1 and 20. More than that could get weird
         # for deep stacks and lots of players as each game would mean more hands played per game ->  less table
         # variety per batch -> lower quality data
-        self.replay = 1  if self.mode == "tree" else 10
+        self.replay = 1 if self.mode == "tree" else 10
         self.tree_expansion = 3  # good options are 3, 4, 5
         self.max_acceptable_game_length = 1000
         self.use_early_stopping = True
         self.batch_size = batch_size
         self.log_folder = log_folder
         log_path = os.path.join(self.log_folder, "tensorboard_logs")
-        self.writer = SummaryWriter(log_dir=log_path)
+        self.writer = SummaryWriter(log_dir=log_path) if self.table_id == 0 else None
         self.timer = SemanticTimer()
         self.alg_class = get_current_game_config()["alg"]
         self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
@@ -72,7 +73,6 @@ class HoldemTable(BaseTable):
         self.hand_info = None
         self.current_hand = None
         self.player_winnings: dict[int, float] = None
-        self.mode = None
         self._play_round = None
 
         # for recurrent models
@@ -120,20 +120,6 @@ class HoldemTable(BaseTable):
             self.starting_stacks = starting_stacks[:]  # will use it to compute game winnings
 
         self.game_starting_stacks = self.starting_stacks[:]
-
-        self.mode = self.game_params.pop("mode")
-        if IS_RECURRENT:
-            # only support linear mode for recurrent models, since it requires to keep the sequential aspect.
-            # TODO: think to see if tree is compatible. Maybe by duplicating previous steps to keep parallel linear paths rather than branches at storage time.
-            # TODO: [continue] could set all sample_weights to 1, but use the expected reward rather than the specific path reward to still help with variance
-            self.mode = "linear"
-
-        if self.mode == "linear":
-            self._play_round = self._play_linear_round
-        elif self.mode == "tree":
-            self._play_round = self._play_tree_round
-        else:
-            raise NotImplementedError(self.mode)
 
         self._reset_hand_info()
 
@@ -586,7 +572,8 @@ class HoldemTable(BaseTable):
 
             self.num_games_played += 1
 
-            self.timer.log_to_tensorboard(self.writer, self.table_id, self.num_games_played)
+            if self.writer is not None and self.num_games_played % 1000 == 0:
+                self.timer.log_to_tensorboard(self.writer, self.table_id, self.num_games_played)
 
             return True
 
@@ -595,6 +582,14 @@ class HoldemTable(BaseTable):
             return False
 
     def start(self):
+        # only set it here to allow subclasses to edit self.mode before the _play_round function is assigned
+        if self.mode == "linear":
+            self._play_round = self._play_linear_round
+        elif self.mode == "tree":
+            self._play_round = self._play_tree_round
+        else:
+            raise NotImplementedError(self.mode)
+
         while True:
             try:
                 data = self.in_queue.get(block=True, timeout=1)
@@ -706,6 +701,7 @@ class HoldemTable(BaseTable):
                             "hand_info": ray.put(session_hand_info[pid]),
                             "player_winnings": session_player_winnings[pid],
                             "num_samples": num_samples,
+                            "num_games": self.replay,
                             "version": p_version
                         })
                     # now we send back the players

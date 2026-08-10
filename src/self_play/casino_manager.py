@@ -312,15 +312,7 @@ class CasinoManager:
 
                     self.data_storage.add(player_id, hand_info, num_samples)
 
-                self.winnings_buffer.append((player_id, player_winnings))
-                # send the player_winnings to the leaderboard
-                if time.time() - self.leaderboard_timer >= self.leaderboard_refresh:  # refresh every 2 second
-                    self.leaderboard_queue.put_nowait((self.winnings_buffer, len(self.table_ids), len(self.trainer_ids),
-                                                       self.is_playing, self.is_training, self.is_playing_against,
-                                                       self.player_dispatch_times, self.table_scheduler.historical_players_used,
-                                                       self.historical_sampler.len.remote()))
-                    self.winnings_buffer = []
-                    self.leaderboard_timer = time.time()
+                self.winnings_buffer.append((player_id, player_winnings, data["num_games"]))
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
@@ -443,6 +435,15 @@ class CasinoManager:
                 with self.timer.time("5_Sleep_Backoff"):
                     if not activity_this_loop:
                         time.sleep(1e-6)
+
+                with self.timer.time("6_Leaderboard_Update"):
+                    if time.time() - self.leaderboard_timer >= self.leaderboard_refresh:
+                        self.leaderboard_queue.put_nowait((self.winnings_buffer, len(self.table_ids), len(self.trainer_ids),
+                                                           self.is_playing, self.is_training, self.is_playing_against,
+                                                           self.player_dispatch_times, self.table_scheduler.historical_players_used,
+                                                           self.historical_sampler.len.remote()))
+                        self.winnings_buffer = []
+                        self.leaderboard_timer = time.time()
 
             self.loop_step += 1
             if self.loop_step % 10000 == 0:

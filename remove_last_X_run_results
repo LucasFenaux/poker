@@ -7,8 +7,11 @@ KEEP=${1:-3}
 echo "Starting cleanup..."
 echo "Keeping the $KEEP most recent runs and deleting the rest."
 
-# We inject the $KEEP variable directly into the string sent to Docker.
-# Notice we removed the internal X= from the Docker command entirely!
-docker compose run --rm casino_backend bash -c "cd /app/results && for dir in \$(ls -d run_* 2>/dev/null | head -n -$KEEP); do rm -rf \$dir tb_logs/\$dir; done"
+# We also clean up tb_logs directly in case there are orphaned logs (where the run folder was already deleted)
+docker compose run --rm casino_backend bash -c "cd /app/results && \
+  for dir in \$(ls -d run_* 2>/dev/null | head -n -$KEEP); do rm -rf \$dir tb_logs/\$dir; done && \
+  cd tb_logs 2>/dev/null && \
+  for dir in \$(ls -d run_* 2>/dev/null | head -n -$KEEP); do rm -rf \$dir; done"
 
-echo "Cleanup complete!"
+echo "Cleanup complete! Note: You must restart TensorBoard for it to remove the deleted runs from the UI."
+echo "Run: docker compose restart tensorboard"

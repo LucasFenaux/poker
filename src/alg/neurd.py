@@ -131,13 +131,6 @@ class NeuRD(OnPolicyAlgorithm):
         with torch.no_grad():
             value_function = self.value_network(*states).squeeze(-1)
             advantages = batch_rewards - value_function.clone().detach()
-            if sample_weights is None:
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            else:
-                weighted_mean = (advantages * prob_sample_weights).sum()
-                weighted_var = (prob_sample_weights * ((advantages - weighted_mean) ** 2)).sum()
-                weighted_std = torch.sqrt(weighted_var + 1e-8)
-                advantages = (advantages - weighted_mean) / (weighted_std + 1e-8)
 
         count = 0
         avg_v_loss = 0
