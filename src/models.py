@@ -7,7 +7,7 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 import pokerkit
 from torch.nn import ModuleList
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT
 from src.state_interpreter import StateSnapshot
 from src.game_registry import get_current_game_config
 
@@ -38,11 +38,12 @@ def preprocess_raw_states(states_list, actors_list, device):
 
 
 class PokerModel(nn.Module):
-    def __init__(self, interpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str, return_logits: bool = False):
         super(PokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
+        self.return_logits = return_logits
 
         self.embed_net = nn.Sequential(
             nn.Linear(self.input_dim, 256), nn.GELU(),
@@ -74,18 +75,27 @@ class PokerModel(nn.Module):
                 if not self.deterministic:
                     self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
                     nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
+            elif self.mode == "categorical":
+                # deterministic and categorical -> categorical
+                # need to get the number of discrete actions
+                num_betting_sizes = get_current_game_config()['action_map'].NUM_BETTING_SIZES
+                self.bet_sizing_net.append(nn.Linear(64, num_betting_sizes))
+                nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
             else:
                 raise NotImplementedError(self.mode)
 
             self.use_bet_sizing_net = True
 
     def _forward_action(self, feature_vector: torch.Tensor):
-        action = self.action_net(feature_vector)
+        feature_embedding = self.embed_net(feature_vector)
 
+        logits = self.action_net(feature_embedding)
+        if self.return_logits:
+            return logits
         if self.deterministic:
-            return action
+            return torch.argmax(logits, dim=-1)
 
-        dist = Categorical(logits=action)
+        dist = Categorical(logits=logits)
         return dist
 
     def _forward_beta(self, feature_vector: torch.Tensor):
@@ -110,6 +120,16 @@ class PokerModel(nn.Module):
             mu = self.bet_sizing_net[0](feature_embedding)
             std = F.softplus(self.bet_sizing_net[1](feature_embedding)) + 1e-5
             dist = Normal(mu, std)
+            return dist
+
+    def _forward_categorical(self, feature_vector: torch.Tensor):
+        logits = self.bet_sizing_net[0](self.embed_net(feature_vector))
+        if self.return_logits:
+            return logits
+        if self.deterministic:
+            return torch.argmax(logits, dim=-1)
+        else:
+            dist = Categorical(logits=logits)
             return dist
 
     def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor, dict],
@@ -144,6 +164,8 @@ class PokerModel(nn.Module):
                 bet_sizing_dist = self._forward_normal(feature_vector)
             elif self.mode == "beta":
                 bet_sizing_dist = self._forward_beta(feature_vector)
+            elif self.mode == "categorical":
+                bet_sizing_dist = self._forward_categorical(feature_vector)
             else:
                 raise NotImplementedError
         else:
@@ -189,11 +211,12 @@ class ValueModel(nn.Module):
 
 
 class HierarchicalPokerModel(nn.Module):
-    def __init__(self, interpreter, deterministic: bool, mode: str):
+    def __init__(self, interpreter, deterministic: bool, mode: str, return_logits: bool=False):
         super(HierarchicalPokerModel, self).__init__()
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
+        self.return_logits = return_logits
         self.hand_memory_size = 64
         self.game_memory_size = 32
         self.hand_gru = nn.GRUCell(input_size=128, hidden_size=self.hand_memory_size)
@@ -233,6 +256,10 @@ class HierarchicalPokerModel(nn.Module):
                 if not self.deterministic:
                     self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
                     nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
+            elif self.mode == "categorical":
+                num_betting_sizes = get_current_game_config()['action_map'].NUM_BETTING_SIZES
+                self.bet_sizing_net.append(nn.Linear(64, num_betting_sizes))
+                nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
             else:
                 raise NotImplementedError(self.mode)
 
@@ -245,8 +272,11 @@ class HierarchicalPokerModel(nn.Module):
     def _forward_action(self, feature_vector: torch.Tensor):
         action = self.action_net(feature_vector)
 
-        if self.deterministic:
+        if self.return_logits:
             return action
+
+        if self.deterministic:
+            return torch.argmax(action, dim=-1)
 
         dist = Categorical(logits=action)
         return dist
@@ -267,6 +297,16 @@ class HierarchicalPokerModel(nn.Module):
             mu = self.bet_sizing_net[0](feature_vector)
             std = F.softplus(self.bet_sizing_net[1](feature_vector)) + 1e-5
             dist = Normal(mu, std)
+            return dist
+
+    def _forward_categorical(self, feature_vector: torch.Tensor):
+        logits = self.bet_sizing_net[0](feature_vector)
+        if self.return_logits:
+            return logits
+        if self.deterministic:
+            return torch.argmax(logits, dim=-1)
+        else:
+            dist = Categorical(logits=logits)
             return dist
 
     def forward(self, state: Union[pokerkit.State, StateSnapshot, list, torch.Tensor, dict],
@@ -309,6 +349,8 @@ class HierarchicalPokerModel(nn.Module):
                 bet_sizing_dist = self._forward_normal(policy_features)
             elif self.mode == "beta":
                 bet_sizing_dist = self._forward_beta(policy_features)
+            elif self.mode == "categorical":
+                bet_sizing_dist = self._forward_categorical(policy_features)
             else:
                 raise NotImplementedError
         else:
@@ -380,21 +422,21 @@ def get_value_model(device: torch.device) -> Union[ValueModel, HierarchicalValue
         return ValueModel(interpreter).to(device)
 
 
-def load_model(player_id, device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+def load_model(player_id, device, deterministic=False, mode="beta", return_logits: bool = False) -> Union[PokerModel, HierarchicalPokerModel]:
     StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
-        model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)
+        model = HierarchicalPokerModel(interpreter, deterministic, mode, return_logits).to(device)
     else:
-        model = PokerModel(interpreter, deterministic, mode).to(device)
+        model = PokerModel(interpreter, deterministic, mode, return_logits).to(device)
     return model
 
 
-def load_dummy_model(device, deterministic=False, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+def load_dummy_model(device, deterministic=False, mode="beta", return_logits: bool = False) -> Union[PokerModel, HierarchicalPokerModel]:
     StateInterpreter = get_current_game_config()['state_interpreter']
     interpreter = StateInterpreter(device).to(device)
     if IS_RECURRENT:
-        model = HierarchicalPokerModel(interpreter, deterministic, mode).to(device)
+        model = HierarchicalPokerModel(interpreter, deterministic, mode, return_logits).to(device)
     else:
-        model = PokerModel(interpreter, deterministic, mode).to(device)
+        model = PokerModel(interpreter, deterministic, mode, return_logits).to(device)
     return model

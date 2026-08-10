@@ -4,8 +4,8 @@ import torch
 from datetime import datetime
 import uuid
 
-from src.ppo_self_play.casino_manager import CasinoManager
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.self_play.casino_manager import CasinoManager
+from src.global_settings import IS_RECURRENT
 
 
 def get_save_folder(base_path="results"):
@@ -21,7 +21,7 @@ def get_save_folder(base_path="results"):
     unique_id = uuid.uuid4().hex[:8]
 
     # 3. Combine them
-    from src.ppo_self_play.global_settings import GAME_TYPE
+    from src.global_settings import GAME_TYPE
     folder_name = f"run_{GAME_TYPE}_{timestamp}_{unique_id}"
     full_path = os.path.join(base_path, folder_name)
 
@@ -34,10 +34,11 @@ def get_save_folder(base_path="results"):
 if __name__ == '__main__':
     try:
         ray.init("auto", namespace="casino",
+                 runtime_env={"excludes": [".venv", "results", "data", "screenlog.0", ".git", "run_*"]}
                  )
         device = torch.device("cpu")
         
-        from src.ppo_self_play.global_settings import GAME_TYPE
+        from src.global_settings import GAME_TYPE
         
         resume = os.environ.get("RESUME_LATEST", "").lower() == "true"
         if resume:
@@ -65,4 +66,6 @@ if __name__ == '__main__':
         manager.start()
         ray.shutdown()
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         ray.shutdown()

@@ -21,7 +21,19 @@ for run in $runs; do
         mkdir -p "./$run"
 
         # 5. Copy just the players folder into our local matching structure
-        docker cp "$CONTAINER_NAME:$BASE_DIR/$run/players" "./$run/"
+        docker cp "$CONTAINER_NAME:$BASE_DIR/$run/players" "./results/$run/"
+    else
+        echo "No players folder found in $run, skipping..."
+    fi
+
+      if docker exec "$CONTAINER_NAME" sh -c "[ -d $BASE_DIR/$run/historical_checkpoints ]"; then
+        echo "Copying historical data for run: $run"
+
+        # 4. Create the local directory structure (the -p flag prevents errors if the folder already exists)
+        mkdir -p "./$run"
+
+        # 5. Copy just the players folder into our local matching structure
+        docker cp "$CONTAINER_NAME:$BASE_DIR/$run/historical_checkpoints" "./results/$run/"
     else
         echo "No players folder found in $run, skipping..."
     fi

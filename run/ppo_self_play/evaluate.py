@@ -10,8 +10,10 @@ from pokerkit import NoLimitTexasHoldem, Automation, State, calculate_equities, 
 # --- Local Project Imports ---
 from src.state_interpreter import extract_state_snapshot
 from src.action_interpreter import Action
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
+from src.global_settings import IS_RECURRENT
+from src.game_registry import get_current_game_config
+
 
 game_config = get_current_game_config()
 ActionInterpreter = game_config['action_interpreter']
@@ -90,12 +92,12 @@ class FastBaselineBot:
 
 # --- 2. Evaluation Engine Helpers ---
 def get_latest_run_folder(base_path="results"):
-    from src.ppo_self_play.global_settings import GAME_TYPE
+    from src.global_settings import GAME_TYPE
     runs = glob.glob(os.path.join(base_path, f"run_{GAME_TYPE}_*"))
     
     if not runs and GAME_TYPE == "HOLDEM":
         all_runs = glob.glob(os.path.join(base_path, "run_*"))
-        from src.ppo_self_play.global_settings import GAME_TYPES
+        from src.global_settings import GAME_TYPES
         other_games = [gt for gt in GAME_TYPES if gt != "HOLDEM"]
         runs = [r for r in all_runs if not any(os.path.basename(r).startswith(f"run_{gt}_") for gt in other_games)]
 

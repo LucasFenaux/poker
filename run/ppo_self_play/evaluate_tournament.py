@@ -10,9 +10,9 @@ from pokerkit import NoLimitTexasHoldem, Automation
 from src.state_interpreter import extract_state_snapshot
 from src.game_registry import get_current_game_config
 from src.action_interpreter import Action
-from src.ppo_self_play.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
+from src.alg import PPO, PPOInferenceWrapper, RNNPPOInferenceWrapper, RNNPPO
 from evaluate import get_latest_run_folder
-from src.ppo_self_play.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT
 
 
 def flatten_cards(cards):

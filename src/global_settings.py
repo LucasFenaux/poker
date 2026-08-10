@@ -6,9 +6,13 @@ import os
 # 4 tables
 # 2 trainers
 GAME_TYPES=["HOLDEM", "KUHN"]
+ALG_TYPES=["PPO", "NEURD"]
 # NUM_CPUS=os.environ["RAY_NUM_CPUS"]  # Set your desired CPU limit here
 # GAME_TYPE="HOLDEM"
 GAME_TYPE="KUHN"
+# ALG="PPO"
+ALG="NEURD"
+
 NUM_CPUS=os.environ.get("RAY_NUM_CPUS",10)
 NUM_GPUS=0
 IS_RECURRENT=True
@@ -28,8 +32,8 @@ if GAME_TYPE=="HOLDEM":
     NUM_TABLES=30
     NUM_TRAINERS=30
     RESOURCE_LIMITED=False
-    HISTORY_BURN_IN=100
-    HISTORY_LOG_WIDTH = 10
+    HISTORY_BURN_IN=50
+    HISTORY_LOG_WIDTH = 2
 
 elif GAME_TYPE=="KUHN":
     MAX_TABLE_SIZE=2
@@ -38,7 +42,7 @@ elif GAME_TYPE=="KUHN":
     NUM_TRAINERS=50
     RESOURCE_LIMITED=False
     HISTORY_BURN_IN=10
-    HISTORY_LOG_WIDTH = 5
+    HISTORY_LOG_WIDTH = 2
 
 else:
     raise NotImplementedError

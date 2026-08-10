@@ -6,3 +6,4 @@ __pycache__/
 data/
 pyproject.toml
 uv.lock
+screenlog.0

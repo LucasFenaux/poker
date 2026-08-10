@@ -8,21 +8,20 @@ from ray.util.queue import Queue, Empty
 import os
 import torch
 
-from src.ppo_self_play.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT
-from src.ppo_self_play.alg import PPO, RNNPPO
-from src.ppo_self_play.trainer_actor import TrainerActor
-from src.game_registry import get_current_game_config
-from src.ppo_self_play.leaderboard_actor import LeaderboardActor
-from src.ppo_self_play.data_storage import DataStorage
+from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT, ALG, GAME_TYPE
+from src.self_play.trainer_actor import TrainerActor
+from src.self_play.leaderboard_actor import LeaderboardActor
+from src.self_play.data_storage import DataStorage
 from src.player_ai import PlayerAI, RNNPlayerAI
 from torch.utils.tensorboard import SummaryWriter
 from src.shared import SemanticTimer
-from src.ppo_self_play.scheduler import JITTableScheduler, HistoricalSampling
+from src.self_play.scheduler import JITTableScheduler, HistoricalSampling
 
 
 class CasinoManager:
-    def __init__(self, device: torch.device, save_folder: str = "./", discrete: bool = False,
+    def __init__(self, device: torch.device, save_folder: str = "./",
                  bc_pretrained_model_path: str = None, resume: bool = False):
+        from src.game_registry import get_current_game_config
         try:
             self.player_ids = list(range(NUM_PLAYERS))
             self.device = device
@@ -35,8 +34,8 @@ class CasinoManager:
             run_name = os.path.basename(save_folder)
             self.log_folder = os.path.join(os.path.dirname(save_folder), "tb_logs", run_name)
             os.makedirs(self.log_folder, exist_ok=True)
-            self.mode = "beta"
-
+            self.mode = "categorical" if ALG == "NEURD" else "beta"
+            self.discrete = True if ALG == "NEURD" else False
             manager_log_path = os.path.join(self.log_folder, "tensorboard_logs")
             self.writer = SummaryWriter(log_dir=manager_log_path)
             self.timer = SemanticTimer()
@@ -49,13 +48,14 @@ class CasinoManager:
             self.player_dispatch_times = {player_id: time.time() for player_id in self.player_ids}
             self.timeout_threshold = 3600  # 1 hour (adjust based on how long a normal game/training takes)
             self.last_timeout_check = time.time()
-
+            self.alg_class = get_current_game_config()["alg"]
+            self.inference_wrapper_class = get_current_game_config()["inference_wrapper"]
             # we spin up the player models
             if IS_RECURRENT:
-                self.players = [ray.put(RNNPlayerAI(RNNPPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                self.players = [ray.put(RNNPlayerAI(self.alg_class.init_networks(torch.device("cpu"), discrete=self.discrete, mode=self.mode))) for _ in
                                 self.player_ids]
             else:
-                self.players = [ray.put(PlayerAI(PPO.init_networks(torch.device("cpu"), discrete=discrete, mode=self.mode))) for _ in
+                self.players = [ray.put(PlayerAI(self.alg_class.init_networks(torch.device("cpu"), discrete=self.discrete, mode=self.mode))) for _ in
                                 self.player_ids]
             self.player_training_counts = [0] * len(self.player_ids)
             
@@ -108,10 +108,13 @@ class CasinoManager:
             if IS_RECURRENT:
                 # number of games
                 # self.batch_size = 1_000 if RESOURCE_LIMITED else 8_000
-                self.batch_size = 10 if RESOURCE_LIMITED else 80
+                self.batch_size = 250 if RESOURCE_LIMITED else 2_000   # kuhn poker has ~2 transitions per game
             else:
                 # number of transitions
-                self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
+                if GAME_TYPE == "KUHN":
+                    self.batch_size = 500 if RESOURCE_LIMITED else 4_000
+                else:
+                    self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
             self.on_policy = True
 
             # self.table_scheduler = PlanTableScheduler(self.table_min_size, self.table_max_size, self.player_ids)
@@ -121,7 +124,7 @@ class CasinoManager:
             self.historical_sampling_receive_queue = Queue(maxsize=self.historical_sampling_queue_len)
             self.historical_sampler = HistoricalSampling.remote(self.player_ids, self.historical_sampling_send_queue,
                                                          self.historical_sampling_receive_queue, self.historical_save_folder,
-                                                         discrete, self.mode)
+                                                         self.discrete, self.mode)
             self.historical_sampler.start.remote()
             
             historical_players_used = 0
@@ -146,10 +149,10 @@ class CasinoManager:
             print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
                   f"{self.table_max_size}...")
             self.table_ids = [table_id for table_id in range(NUM_TABLES)]
-            TableActor = get_current_game_config()['table_actor']
-            self.tables = [TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
+            self.TableActor = get_current_game_config()['table_actor']
+            self.tables = [self.TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                              self.historical_sampling_receive_queue,
-                                             self.table_max_size, discrete, self.mode,
+                                             self.table_max_size, self.discrete, self.mode,
                                              self.batch_size, self.log_folder) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
             for table in self.tables:
                 table.start.remote()
@@ -159,7 +162,7 @@ class CasinoManager:
             self.trainer_ids = [trainer_id for trainer_id in range(NUM_TRAINERS)]
             self.trainers = [TrainerActor.remote(i, self.trainer_send_queue, self.trainer_receive_queue,
                                                  self.historical_sampling_send_queue,
-                                                 device, discrete,
+                                                 device, self.discrete,
                                                  self.log_folder, self.player_save_folder, self.mode)
                              for i in self.trainer_ids]
             for trainer in self.trainers:
@@ -172,8 +175,10 @@ class CasinoManager:
                 self.trainer_receive_queue, self.player_ids, save_folder)
 
             self.leaderboard.start.remote()
+            self.leaderboard_timer = time.time()
+            self.leaderboard_refresh = 2  # two second refresh cap to not overload the main thread
+            self.winnings_buffer = []
 
-            self.discrete = discrete
             # min and max stack params are defined in terms of # of big blinds
             config = get_current_game_config()
             self.min_stack = config["min_stack"]
@@ -307,11 +312,7 @@ class CasinoManager:
 
                     self.data_storage.add(player_id, hand_info, num_samples)
 
-                # send the player_winnings to the leaderboard
-                self.leaderboard_queue.put_nowait((player_id, player_winnings, len(self.table_ids), len(self.trainer_ids),
-                                                   self.is_playing, self.is_training, self.is_playing_against,
-                                                   self.player_dispatch_times, self.table_scheduler.historical_players_used,
-                                                   self.historical_sampler.len.remote()))
+                self.winnings_buffer.append((player_id, player_winnings, data["num_games"]))
 
             elif data["type"] == "player":
                 player_id, other_players = data["player_id"], data["other_players"]
@@ -358,8 +359,7 @@ class CasinoManager:
                     table_id += 1
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
-                TableActor = get_current_game_config()['table_actor']
-                new_table = TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
+                new_table = self.TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
                                       self.table_max_size, self.discrete, self.mode, self.batch_size)
                 self.tables.append(new_table)
                 new_table.start.remote()
@@ -371,7 +371,9 @@ class CasinoManager:
             return queue_empty
 
     def start_casino(self):
+        from src.game_registry import get_current_game_config
         print(f"Casino Starting")
+        game_config = get_current_game_config()
 
         while (not self.stop_event.is_set()):  # keep running the casino forever
             with self.timer.time("Manager_Total_Loop_Time"):
@@ -401,7 +403,6 @@ class CasinoManager:
                         activity_this_loop = True
                         table_size = len(list(player_ids))
 
-                        game_config = get_current_game_config()
                         table_param_generator = game_config['table_param_generator']
                         small_blind = 1
                         big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind
@@ -435,6 +436,15 @@ class CasinoManager:
                     if not activity_this_loop:
                         time.sleep(1e-6)
 
+                with self.timer.time("6_Leaderboard_Update"):
+                    if time.time() - self.leaderboard_timer >= self.leaderboard_refresh:
+                        self.leaderboard_queue.put_nowait((self.winnings_buffer, len(self.table_ids), len(self.trainer_ids),
+                                                           self.is_playing, self.is_training, self.is_playing_against,
+                                                           self.player_dispatch_times, self.table_scheduler.historical_players_used,
+                                                           self.historical_sampler.len.remote()))
+                        self.winnings_buffer = []
+                        self.leaderboard_timer = time.time()
+
             self.loop_step += 1
             if self.loop_step % 10000 == 0:
                 self.timer.log_to_tensorboard(self.writer, "Manager", self.loop_step)
@@ -444,7 +454,9 @@ class CasinoManager:
         print("Casino cleaning up and shutting down...")
 
     def old_start_casino(self):
+        from src.game_registry import get_current_game_config
         print(f"Casino Starting")
+        game_config = get_current_game_config()
 
         while (not self.stop_event.is_set()):   # keep running the casino forever
             # casino main loop
@@ -463,7 +475,6 @@ class CasinoManager:
             while player_ids is not None:
                 table_size = len(list(player_ids))
                 # spin up a table
-                game_config = get_current_game_config()
                 table_param_generator = game_config['table_param_generator']
                 small_blind = 1
                 big_blind = random.randint(self.min_bb_ratio, self.max_bb_ratio) * small_blind

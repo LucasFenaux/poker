@@ -4,7 +4,7 @@ import json
 import os
 import asyncio
 from fractions import Fraction
-from src.ppo_self_play.global_settings import NUM_TRAINERS, NUM_TABLES
+from src.global_settings import NUM_TRAINERS, NUM_TABLES
 
 
 class PokerEncoder(json.JSONEncoder):
@@ -35,7 +35,8 @@ class LeaderboardActor:
         self.save_folder = save_folder
         self.history_player_winnings = {player_id: [] for player_id in player_ids}
         self.player_ids = player_ids
-        self.recent_avg_lookback = 100
+        self.read_write_frequency = 100
+        self.recent_avg_lookback = 10 * self.read_write_frequency
         # New per-player game counter
         self.number_games_played = {player_id: 0 for player_id in player_ids}
         self.is_done = False
@@ -84,7 +85,7 @@ class LeaderboardActor:
 
                 if data is not None:
                     # print("updating")
-                    (player_id, player_winnings, num_tables, num_trainers, is_playing, is_training, is_playing_against,
+                    (winnings_batch, num_tables, num_trainers, is_playing, is_training, is_playing_against,
                      player_dispatch_times, historical_players_used, num_historical_checkpoints) = data
                     self.num_tables = num_tables
                     self.num_trainers = num_trainers
@@ -95,7 +96,8 @@ class LeaderboardActor:
                     self.historical_players_used = historical_players_used
                     self.num_historical_checkpoints = num_historical_checkpoints
 
-                    self.update(player_id, player_winnings)
+                    for p_id, p_winnings, num_games in winnings_batch:
+                        self.update(p_id, p_winnings, num_games)
 
                 await asyncio.sleep(0)
             # except (asyncio.TimeoutError, TimeoutError):  # <--- Fixed exception type!
@@ -170,9 +172,9 @@ class LeaderboardActor:
     def set_done(self):
         self.is_done = True
 
-    def update(self, player_id, player_winnings):
-        self.history_player_winnings[player_id].append(player_winnings)
-        self.number_games_played[player_id] += 1
+    def update(self, player_id, player_winnings, num_games):
+        self.history_player_winnings[player_id].append(player_winnings / max(1, num_games))
+        self.number_games_played[player_id] += num_games
         # self.save()  # Ensures it saves to the file every time a game finishes
 
         # Calculate the current average as an integer (e.g., 15.8 becomes 15)
@@ -180,7 +182,7 @@ class LeaderboardActor:
         current_avg_int = int(total_games / max(1, len(self.player_ids)))
 
         # Only trigger the hard drive save if we passed a new integer threshold
-        if current_avg_int // 10 > self.last_saved_avg // 10:  # buffer read/write to every 10 games
+        if current_avg_int // self.read_write_frequency > self.last_saved_avg // self.read_write_frequency:  # buffer read/write to every 10 games
             self.save()
             self.last_saved_avg = current_avg_int
 

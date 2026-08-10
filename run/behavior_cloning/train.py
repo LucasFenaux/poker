@@ -13,10 +13,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from src.action_interpreter import Action
-from src.models import load_model, get_value_model
-from src.game_registry import get_current_game_config
-from src.ppo_self_play.global_settings import IS_RECURRENT, GAME_TYPE
-from src.ppo_self_play.alg import RNNPPO, PPO
+from src.global_settings import IS_RECURRENT, GAME_TYPE
+from src.alg import RNNPPO, PPO
 from torch.distributions.normal import Normal
 from torch.distributions.beta import Beta
 
