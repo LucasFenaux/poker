@@ -38,7 +38,14 @@ class RNNNeuRDInferenceWrapper(RNNPPOInferenceWrapper):
 
 
 class RNNNeuRD(NeuRD):
-    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical", discrete=True):
+    default_hyperparameters = {
+        "mini_batch_size": 500,
+        "lr": 1e-4,
+        "value_lr": 5e-4,
+        "grad_clip_norm": 0.5,
+        "reward_normalization_scaler": 1,
+    }
+    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical", discrete=True, **kwargs):
         super(RNNNeuRD, self).__init__(lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode, discrete)
         self.hand_memory_sizes = [self.network.hand_memory_size, self.value_network.hand_memory_size]
         self.game_memory_sizes = [self.network.game_memory_size, self.value_network.game_memory_size]
@@ -169,11 +176,6 @@ class RNNNeuRD(NeuRD):
             batch_first=True, padding_value=0
         )
 
-        if sample_weights is not None:
-            sample_weights = torch.tensor(sample_weights, device=self.device)
-            assert sample_weights.dim() == 1
-            normalized_sample_weights = sample_weights / sample_weights.mean()
-            prob_sample_weights = sample_weights / sample_weights.sum()
 
         h_0 = torch.zeros(num_sequences, self.network.hand_memory_size, device=self.device)
         g_0 = torch.zeros(num_sequences, self.network.game_memory_size, device=self.device)
@@ -200,18 +202,12 @@ class RNNNeuRD(NeuRD):
             mb_g_0 = g_0[mini_batch_indices]
             mb_new_hands = padded_new_hands[mini_batch_indices]
 
-            if sample_weights is not None:
-                mb_sample_weights = normalized_sample_weights[mini_batch_indices]
 
             self.value_optimizer.zero_grad()
             value_function = self._unroll_value(mb_states_dict, mb_h_0, mb_g_0, mb_new_hands).squeeze(-1)
             
             v_loss_unreduced = torch.nn.functional.smooth_l1_loss(value_function, mb_rewards, reduction="none")
-            if sample_weights is None:
-                value_loss = (v_loss_unreduced * mb_mask).sum() / mb_mask.sum()
-            else:
-                value_loss = (v_loss_unreduced * mb_mask * mb_sample_weights.unsqueeze(-1)).sum() / mb_mask.sum()
-                
+            value_loss = (v_loss_unreduced * mb_mask).sum() / mb_mask.sum()                
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_clip_norm)
             self.value_optimizer.step()
@@ -233,10 +229,7 @@ class RNNNeuRD(NeuRD):
 
             policy_loss_unreduced = -logits * mb_advantages.unsqueeze(-1)
 
-            if sample_weights is None:
-                policy_loss = (policy_loss_unreduced * mb_mask.unsqueeze(-1)).sum() / mb_mask.sum()
-            else:
-                policy_loss = (policy_loss_unreduced * mb_mask.unsqueeze(-1) * mb_sample_weights.unsqueeze(-1).unsqueeze(-1)).sum() / mb_mask.sum()
+            policy_loss = (policy_loss_unreduced * mb_mask.unsqueeze(-1)).sum() / mb_mask.sum()
 
             if not torch.isfinite(policy_loss):
                 print("WARNING: loss is not finite")

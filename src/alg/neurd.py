@@ -20,7 +20,7 @@ class NeuRD(OnPolicyAlgorithm):
         "reward_normalization_scaler": 1,
     }
     def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical",
-                 discrete=True):
+                 discrete=True, **kwargs):
         super(NeuRD, self).__init__(lr, device)
         self.mini_batch_size =mini_batch_size
         self.value_lr = value_lr

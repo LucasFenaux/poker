@@ -1,6 +1,6 @@
 import importlib
 from pokerkit import NoLimitTexasHoldem, KuhnPoker, Automation
-from src.global_settings import GAME_TYPE, IS_RECURRENT
+from src.global_settings import GAME_TYPE, IS_RECURRENT, ALG
 
 
 def get_holdem_table_params(table_size, **kwargs):
@@ -79,18 +79,43 @@ GAME_REGISTRY = {
 
 HYPERPARAMETER_REGISTRY = {
     "HOLDEM": {
-        False: {   # is recurrent
+        "NEURD": {
+            False: {  # is recurrent
+            },
+            True: {
+                # "entropy_coef": 1e-2
+                # "lr": 1e-3,  # higher learning rate to boost learning
+                # "value_lr": 5e-3,   # adjusting the value lr accordingly
+            }
         },
-        True: {
+        "PPO": {
+            False: {  # is recurrent
+            },
+            True: {
+                # "entropy_coef": 1e-2
+                # "lr": 1e-3,  # higher learning rate to boost learning
+                # "value_lr": 5e-3,   # adjusting the value lr accordingly
+            }
         }
     },
-    "KUHN": {
-        False: {  # is recurrent
+    "KUHN":
+        {"PPO": {
+            False: {  # is recurrent
+            },
+            True: {
+                "entropy_coef": 1e-2
+                # "lr": 1e-3,  # higher learning rate to boost learning
+                # "value_lr": 5e-3,   # adjusting the value lr accordingly
+            }
         },
-        True: {
-            "entropy_coef": 1e-2
-            # "lr": 1e-3,  # higher learning rate to boost learning
-            # "value_lr": 5e-3,   # adjusting the value lr accordingly
+    "NEURD": {
+            False: {  # is recurrent
+            },
+            True: {
+                # "entropy_coef": 1e-2
+                # "lr": 1e-3,  # higher learning rate to boost learning
+                # "value_lr": 5e-3,   # adjusting the value lr accordingly
+            }
         }
     }
 }
@@ -140,5 +165,5 @@ def get_current_game_hyperparameters():
     if GAME_TYPE not in GAME_REGISTRY:
         raise ValueError(f"Unknown GAME_TYPE: {GAME_TYPE}. Please define it in GAME_REGISTRY.")
 
-    hyperparameters = HYPERPARAMETER_REGISTRY[GAME_TYPE][IS_RECURRENT]
+    hyperparameters = HYPERPARAMETER_REGISTRY[GAME_TYPE][ALG][IS_RECURRENT]
     return hyperparameters
