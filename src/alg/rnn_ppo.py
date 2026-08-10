@@ -1,14 +1,11 @@
 
 from typing import Union
-import numpy as np
 import torch
 from torch.distributions import Categorical, Normal
 import pokerkit
 from torch.nn.utils.rnn import pad_sequence
-from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
-from src.state_interpreter import safe_log, safe_lin_sqrt
-from src.models import HierarchicalPokerModel
+from utils.models import HierarchicalPokerModel
 from torch.distributions.beta import Beta
 from .ppo import PPO, PPOInferenceWrapper
 

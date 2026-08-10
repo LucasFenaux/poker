@@ -1,12 +1,7 @@
-from typing import Union
-import numpy as np
 import torch
 from torch.distributions import Categorical
-import pokerkit
 from torch.nn.utils.rnn import pad_sequence
-from src.action_interpreter import Action
-from src.models import HierarchicalPokerModel
-from .neurd import NeuRD, NeuRDInferenceWrapper
+from .neurd import NeuRD
 from .rnn_ppo import RNNPPOInferenceWrapper
 
 

@@ -1,7 +1,7 @@
 from typing import Union
 from ray.util.queue import Queue
 
-from src.player_ai import PlayerAI, RNNPlayerAI
+from utils.player_ai import PlayerAI, RNNPlayerAI
 from abc import ABC, abstractmethod
 
 

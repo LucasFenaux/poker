@@ -4,7 +4,7 @@ import torch
 from datetime import datetime
 import uuid
 
-from src.self_play.casino_manager import CasinoManager
+from src.marl.casino_manager import CasinoManager
 from src.global_settings import IS_RECURRENT
 
 

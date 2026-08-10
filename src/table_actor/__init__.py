@@ -1,12 +1,12 @@
-from .holdem import HoldemTableActor
-from .kuhn import KuhnTableActor
+from .holdem import MARLHoldemTableActor
+from .kuhn import MARLKuhnTableActor
 from src.global_settings import GAME_TYPE
 
 
 def get_table_actor_class():
     if GAME_TYPE == "KUHN":
-        return KuhnTableActor
+        return MARLKuhnTableActor
     elif GAME_TYPE == "HOLDEM":
-        return HoldemTableActor
+        return MARLHoldemTableActor
     else:
         raise NotImplementedError
