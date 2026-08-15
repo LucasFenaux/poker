@@ -1,7 +1,7 @@
 import ray
 from ray.util.queue import Queue
 from pokerkit import Automation
-from .holdem import HoldemTable, SPHoldemTableActor
+from .holdem import HoldemTable, SPHoldemTable
 import traceback
 from src.global_settings import IS_RECURRENT
 from src.state_interpreter import extract_state_snapshot
@@ -221,5 +221,5 @@ class MARLKuhnTableActor(KuhnTable):
 
 
 @ray.remote(num_cpus=0)
-async class SPKuhnTableActor(SPHoldemTableActor):
+class SPKuhnTableActor(SPHoldemTable):
     pass

@@ -35,7 +35,10 @@ class Trainer:
     def save_player(self, player_id, params, player_training_count):
         new_weights, new_optimizer_params = params
         save_data = (new_weights, new_optimizer_params, player_training_count)
-        torch.save(save_data, os.path.join(self.player_save_folder, f"{player_id}.pt"))
+        temp_path = os.path.join(self.player_save_folder, f"{player_id}.pt.tmp")
+        final_path = os.path.join(self.player_save_folder, f"{player_id}.pt")
+        torch.save(save_data, temp_path)
+        os.replace(temp_path, final_path)
 
     def run(self, player_state_dicts, data_batch, player_training_count: int, optimizer_state_dict = None):
         try:

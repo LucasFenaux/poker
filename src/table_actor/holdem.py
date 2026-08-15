@@ -742,8 +742,7 @@ class MARLHoldemTableActor(HoldemTable):
     pass
 
 
-@ray.remote(num_cpus=0)
-async class SPHoldemTableActor(HoldemTable):
+class SPHoldemTable(HoldemTable):
     def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,
                  historical_sampling_receive_queue: Queue,
                  max_table_size: int, discrete: bool,
@@ -756,12 +755,12 @@ async class SPHoldemTableActor(HoldemTable):
     async def stop(self):
         self.interrupt = True
 
-    def update_table(self, new_model_params_ref, new_optim_params_ref):
+    async def update_table(self, new_model_params_ref, new_optim_params_ref):
         model_params = ray.get(new_model_params_ref)
         optim_params = ray.get(new_optim_params_ref)
         self.player.load_params((model_params, optim_params))
 
-    def start(self):
+    async def start(self):
         self.interrupt = False
         if self.mode == "linear":
             self._play_round = self._play_linear_round
@@ -774,7 +773,7 @@ async class SPHoldemTableActor(HoldemTable):
         table_param_generator = game_config['table_param_generator']
 
         while not self.interrupt:
-            asyncio.sleep(0.001)  # microsleep to catch stops
+            await asyncio.sleep(0.001)  # microsleep to catch stops
             table_size = random.randint(2, self.max_table_size)
             players = [self.player]
             player_ids = [0, ]
@@ -848,8 +847,6 @@ async class SPHoldemTableActor(HoldemTable):
                 for pid in player_ids:
                     if pid < 0: continue  # only regular players get sent back
 
-                    p_index = player_ids.index(pid)
-                    p_version = self.current_player_versions[p_index]
                     if IS_RECURRENT:
                         # num_samples = sum([len(session_hand_info[pid]["states"][i]) for i in range(len(session_hand_info[pid]["states"]))])
                         num_samples = sum([1 for _ in range(len(session_hand_info[pid]["states"]))])
@@ -864,12 +861,16 @@ async class SPHoldemTableActor(HoldemTable):
                         "player_winnings": session_player_winnings[pid],
                         "num_samples": num_samples,
                         "num_games": self.replay,
-                        "version": p_version
                     })
 
+                self.out_queue.put_nowait_batch(batch)
 
             except Exception as e:
                 print(f"Exception: {e} encountered in Table {self.table_id} in start fn")
                 if self.table_id == 0:
                     traceback.print_exc()
 
+
+@ray.remote(num_cpus=0)
+class SPHoldemTableActor(SPHoldemTable):
+    pass

@@ -24,7 +24,9 @@ class RNNNeuRDInferenceWrapper(RNNPPOInferenceWrapper):
         else:
             game_hidden = game_hidden.to(self.device)
 
-        (decision_logits, bet_logits), new_hand_hidden = network(*state_args, hand_hidden=hand_hidden, game_hidden=game_hidden)
+        with torch.no_grad():
+            (decision_logits, bet_logits), new_hand_hidden = network(*state_args, hand_hidden=hand_hidden, game_hidden=game_hidden)
+
         
         if bet_logits is not None:
             return (Categorical(logits=decision_logits), Categorical(logits=bet_logits)), new_hand_hidden

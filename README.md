@@ -15,7 +15,7 @@ To end the container
 
 If you want to pretrain the models using behavior cloning. Use the docker-compose file in the `run/behavior_cloning/` folder 
 to generate the data and the `run/behavior_cloning/train.py` script to pre-train the PPO actors. Make sure to properly specify
-the model path in `run/ppo_marl/main.py` to ensure it is using the pre-trained model.
+the model path in `run/main.py` to ensure it is using the pre-trained model.
 
 ## Logging
 ### Leaderboard

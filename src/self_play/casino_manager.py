@@ -116,8 +116,8 @@ class CasinoManager:
                                              self.historical_sampling_receive_queue,
                                              self.table_max_size, self.discrete, self.mode,
                                              self.batch_size, self.log_folder, self.inference_wrapper) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
-            for table in self.tables:
-                table.start.remote()
+
+            self.active_tasks = [table.start.remote() for table in self.tables]
 
             self.trainer = Trainer(self.historical_sampling_send_queue, device, self.discrete,
                                                  self.log_folder, self.player_save_folder, self.mode)  # in self_play we only have one trainer
@@ -148,11 +148,8 @@ class CasinoManager:
             if data["type"] == "data":
 
                 hand_info, player_winnings = data["hand_info"], data["player_winnings"]
-                data_version = data["version"]
                 num_samples = data["num_samples"]
-                if data_version == self.player_training_count:
-                    # Only add data from the same model version as the current one
-                    self.data_storage.add(PLAYER_ID, hand_info, num_samples)
+                self.data_storage.add(PLAYER_ID, hand_info, num_samples)
 
             elif data["type"] == "termination":
                 table_id = data["table_id"]
@@ -191,8 +188,9 @@ class CasinoManager:
             return
 
         # first we stop the tables
-        for table in self.tables:
-            table.stop()
+        stop_requests = [table.stop.remote() for table in self.tables]
+        ray.get(stop_requests)  # make sure all the stop requests went through
+        ray.get(self.active_tasks)
 
         # we perform the model update
         batch_ref, num_samples = self.data_storage.get_batch(PLAYER_ID)
@@ -204,16 +202,15 @@ class CasinoManager:
         new_optim_params_ref = ray.put(new_optim_params)
 
         # send the new weights to the tables
-        for table in self.tables:
-            table.update_model(new_model_params_ref, new_optim_params_ref)
+        update_requests = [table.update_table.remote(new_model_params_ref, new_optim_params_ref) for table in self.tables]
+        ray.get(update_requests)
 
         # clear the existing queue
         while not self.table_receive_queue.empty():
             self.table_receive_queue.get()
 
         # final, resume the tables with the new weights
-        for table in self.tables:
-            table.start()
+        self.active_tasks = [table.start.remote() for table in self.tables]
 
     def start_casino(self):
         print(f"Casino Starting")

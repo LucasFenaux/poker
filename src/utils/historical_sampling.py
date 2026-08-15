@@ -132,7 +132,10 @@ class HistoricalSampling:
         return player_id, version, psd_ref
 
     def save(self, player_id, player_state_dicts, player_version):
-        torch.save(player_state_dicts, os.path.join(self.player_save_folder, f"{player_id}_{player_version}.pt"))
+        temp_path = os.path.join(self.player_save_folder, f"{player_id}_{player_version}.pt.tmp")
+        final_path = os.path.join(self.player_save_folder, f"{player_id}_{player_version}.pt")
+        torch.save(player_state_dicts, temp_path)
+        os.replace(temp_path, final_path)
 
     def _add_loguniform(self, player_id, version, psd_ref):
         item = (version, psd_ref)
