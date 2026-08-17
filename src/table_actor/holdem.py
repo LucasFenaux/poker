@@ -11,8 +11,8 @@ import random
 import torch
 from src.action_interpreter import Action
 from src.state_interpreter import extract_state_snapshot
-from utils.player_ai import PlayerAI, RNNPlayerAI
-from utils.shared import SemanticTimer
+from src.utils.player_ai import PlayerAI, RNNPlayerAI
+from src.utils.shared import SemanticTimer
 from src.global_settings import IS_RECURRENT, USE_HISTORICAL_SAMPLING, HISTORICAL_SAMPLING_RATE
 from .table_actor import BaseTable
 import traceback
@@ -755,10 +755,9 @@ class SPHoldemTable(HoldemTable):
     async def stop(self):
         self.interrupt = True
 
-    async def update_table(self, new_model_params_ref, new_optim_params_ref):
-        model_params = ray.get(new_model_params_ref)
-        optim_params = ray.get(new_optim_params_ref)
-        self.player.load_params((model_params, optim_params))
+    async def update_table(self, model_params, optim_params):
+        self.player.load_params(model_params)
+        self.player.load_optimizers(optim_params)
 
     async def start(self):
         self.interrupt = False
@@ -779,14 +778,20 @@ class SPHoldemTable(HoldemTable):
             player_ids = [0, ]
             regular_player_ids = [0, ]
             for i in range(1, table_size):
+                added_historical = False
                 if USE_HISTORICAL_SAMPLING:
                     if random.random() < HISTORICAL_SAMPLING_RATE:
-                        players.append(ray.get(self.historical_sampling_receive_queue.get()["ref"]))
-                        player_ids.append(-i)
-                    else:
-                        players.append(self.player)
-                        player_ids.append(i)
-                        regular_player_ids.append(i)
+                        try:
+                            hist_player_ref = self.historical_sampling_receive_queue.get_nowait()["ref"]
+                            players.append(ray.get(hist_player_ref))
+                            player_ids.append(-i)
+                            added_historical = True
+                        except Empty:
+                            pass
+                if not added_historical:
+                    players.append(self.player)
+                    player_ids.append(i)
+                    regular_player_ids.append(i)
             try:
 
                 session_hand_info = {

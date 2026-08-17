@@ -1,18 +1,18 @@
-import random
 import threading
 import time
 import traceback
 
 import ray
+from src.table_actor import get_sp_table_actor_class
 from ray.util.queue import Queue, Empty
 import os
 import torch
 
-from src.global_settings import NUM_TABLES, RESOURCE_LIMITED, IS_RECURRENT, ALG, GAME_TYPE
+from src.global_settings import NUM_TABLES, RESOURCE_LIMITED, IS_RECURRENT, ALG, GAME_TYPE, HISTORY_WIDTH
 from src.self_play.trainer import Trainer
-from utils.player_ai import PlayerAI, RNNPlayerAI
+from src.utils.player_ai import PlayerAI, RNNPlayerAI
 from torch.utils.tensorboard import SummaryWriter
-from utils.shared import SemanticTimer
+from src.utils.shared import SemanticTimer
 from src.utils.historical_sampling import HistoricalSampling
 from src.utils.data_storage import DataStorage
 
@@ -90,14 +90,14 @@ class CasinoManager:
             else:
                 # number of transitions
                 if GAME_TYPE == "KUHN":
-                    self.batch_size = 500 if RESOURCE_LIMITED else 4_000
+                    self.batch_size = 500 if RESOURCE_LIMITED else 40_000
                 else:
                     self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
             self.on_policy = True
 
             self.data_storage = DataStorage([PLAYER_ID, ], self.batch_size, self.log_folder)
 
-            self.historical_sampling_queue_len = 10
+            self.historical_sampling_queue_len = 100
             self.historical_sampling_send_queue = Queue(maxsize=0)
             self.historical_sampling_receive_queue = Queue(maxsize=self.historical_sampling_queue_len)
             self.historical_sampler = HistoricalSampling.remote([PLAYER_ID,], self.historical_sampling_send_queue,
@@ -106,16 +106,17 @@ class CasinoManager:
             self.historical_sampler.start.remote()
 
             self.table_receive_queue = Queue(maxsize=0)
+            self.table_send_queue = Queue(maxsize=0)
 
             # max_tables_needed = len(self.player_ids) // self.table_min_size
             print(f"Opening casino with {NUM_TABLES} permanent tables of size between {self.table_min_size} and "
                   f"{self.table_max_size}...")
             self.table_ids = [table_id for table_id in range(NUM_TABLES)]
-            self.TableActor = get_current_game_config()['table_actor']
-            self.tables = [self.TableActor.remote(table_id, device, self.table_receive_queue,
+            self.TableActor = get_sp_table_actor_class()
+            self.tables = [self.TableActor.remote(table_id, device, self.table_send_queue, self.table_receive_queue,
                                              self.historical_sampling_receive_queue,
                                              self.table_max_size, self.discrete, self.mode,
-                                             self.batch_size, self.log_folder, self.inference_wrapper) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
+                                             self.batch_size, self.log_folder, self.player) for table_id in self.table_ids]   # we spin up the tables at the beginning to avoid the churn
 
             self.active_tasks = [table.start.remote() for table in self.tables]
 
@@ -168,8 +169,10 @@ class CasinoManager:
                     table_id += 1
                 print(f"Creating Table {table_id}")
                 self.table_ids.append(table_id)
-                new_table = self.TableActor.remote(table_id, self.device, self.table_receive_queue,
-                                      self.table_max_size, self.discrete, self.mode, self.batch_size)
+                new_table = self.TableActor.remote(table_id, self.device, self.table_send_queue, self.table_receive_queue,
+                                              self.historical_sampling_receive_queue,
+                                              self.table_max_size, self.discrete, self.mode,
+                                              self.batch_size, self.log_folder, self.player)
                 self.tables.append(new_table)
                 new_table.start.remote()
             else:
@@ -195,11 +198,13 @@ class CasinoManager:
         # we perform the model update
         batch_ref, num_samples = self.data_storage.get_batch(PLAYER_ID)
         batch = ray.get(batch_ref)
-        new_model_params, new_optim_params = self.trainer.start(PLAYER_ID, self.player, num_samples, batch, self.player_training_count)
+        new_model_params, new_optim_params, self.player_training_count = self.trainer.start(PLAYER_ID, self.player, num_samples, batch, self.player_training_count)
         self.player.load_params(new_model_params)
         self.player.load_optimizers(new_optim_params)
         new_model_params_ref = ray.put(new_model_params)
         new_optim_params_ref = ray.put(new_optim_params)
+        if self.player_training_count % HISTORY_WIDTH == 0:
+            print(f"### Player trained {self.player_training_count} times ###")
 
         # send the new weights to the tables
         update_requests = [table.update_table.remote(new_model_params_ref, new_optim_params_ref) for table in self.tables]

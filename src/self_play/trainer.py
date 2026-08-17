@@ -165,7 +165,7 @@ class Trainer:
                     "player_version": new_player_version,
                 }
                 self.historical_sampling_send_queue.put_nowait(data)
-            return training_count
+            return params[0], params[1], new_player_version
 
         except Exception as e:
             print(f"CRITICAL TRAINER CRASH! Rescuing player {player_id}: {e}")
@@ -174,4 +174,4 @@ class Trainer:
             # to prevent the manager from crashing on receipt.
             fallback_weights = player.get_params() if 'player' in locals() else None
             fallback_optim = player.get_optimizer_params() if 'player' in locals() else None
-            return fallback_weights, fallback_optim
+            return fallback_weights, fallback_optim, training_count

@@ -57,10 +57,10 @@ if __name__ == '__main__':
         else:
             save_folder = get_save_folder()
 
-        if GAME_TYPE == "KUHN":
-            bc_pretrained_model_path = None
-        else:
-            bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
+        # if GAME_TYPE == "KUHN":
+        #     bc_pretrained_model_path = None
+        # else:
+        #     bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
 
         if TYPE == "SELF_PLAY":
            CasinoManager = SelfPlayCasinoManager
@@ -70,7 +70,7 @@ if __name__ == '__main__':
             raise NotImplementedError
 
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
-                                               bc_pretrained_model_path=bc_pretrained_model_path,
+                                               # bc_pretrained_model_path=bc_pretrained_model_path,
                                                resume=resume)
         manager.start()
         ray.shutdown()

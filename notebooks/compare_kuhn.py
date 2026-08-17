@@ -249,7 +249,7 @@ def evaluate():
     specific_model_id = None  # Set this to any current model ID to add a dedicated column for it
 
     import math
-    from src.global_settings import HISTORY_LOG_WIDTH
+    from src.global_settings import HISTORY_WIDTH
 
     def get_exp_weight(is_curr, ver, m_id):
         if ver <= 0:
@@ -257,8 +257,8 @@ def evaluate():
         if is_curr:
             return 1.0
         try:
-            k = int(math.log(ver, HISTORY_LOG_WIDTH))
-            return float(HISTORY_LOG_WIDTH ** k)
+            k = int(math.log(ver, HISTORY_WIDTH))
+            return float(HISTORY_WIDTH ** k)
         except ValueError:
             return 1.0
 
@@ -318,6 +318,7 @@ def evaluate():
     print(divider)
     
     mae_totals = {scheme: 0.0 for scheme in weighting_schemes}
+    valid_decisions = {scheme: 0 for scheme in weighting_schemes}
     num_decisions = 0
 
     for player_obj in [cfr_p1, cfr_p2]:
@@ -336,10 +337,14 @@ def evaluate():
                 
                 row_str = f"{str(info_state):<8} | {action_name:<10} | {cfr_prob*100:>6.2f}%"
                 for scheme_name in weighting_schemes:
-                    ppo_prob = scheme_probs[scheme_name][str(info_state)][prob_key]
-                    colored = color_prob(ppo_prob, cfr_prob)
-                    row_str += f" | {colored}"
-                    mae_totals[scheme_name] += abs(cfr_prob - ppo_prob)
+                    if str(info_state) in scheme_probs[scheme_name]:
+                        ppo_prob = scheme_probs[scheme_name][str(info_state)][prob_key]
+                        colored = color_prob(ppo_prob, cfr_prob)
+                        row_str += f" | {colored}"
+                        mae_totals[scheme_name] += abs(cfr_prob - ppo_prob)
+                        valid_decisions[scheme_name] += 1
+                    else:
+                        row_str += f" | {'N/A':<6}"
                 
                 num_decisions += 1
                 print(row_str)
@@ -348,8 +353,12 @@ def evaluate():
     if num_decisions > 0:
         mae_str = f"{'MAE vs':<8} | {'CFR':<10} | {'0.00%':<8}"
         for scheme_name in weighting_schemes:
-            mae_val = (mae_totals[scheme_name] / num_decisions) * 100
-            mae_str += f" | {mae_val:>6.2f}%"
+            vd = valid_decisions[scheme_name]
+            if vd > 0:
+                mae_val = (mae_totals[scheme_name] / vd) * 100
+                mae_str += f" | {mae_val:>6.2f}%"
+            else:
+                mae_str += f" | {'N/A':>7}"
         print(mae_str)
         print("=" * len(header) + "\n")
 

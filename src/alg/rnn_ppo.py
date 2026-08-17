@@ -5,7 +5,7 @@ from torch.distributions import Categorical, Normal
 import pokerkit
 from torch.nn.utils.rnn import pad_sequence
 from src.action_interpreter import Action
-from utils.models import HierarchicalPokerModel
+from src.utils.models import HierarchicalPokerModel
 from torch.distributions.beta import Beta
 from .ppo import PPO, PPOInferenceWrapper
 

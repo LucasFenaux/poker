@@ -220,6 +220,10 @@ class MARLKuhnTableActor(KuhnTable):
     pass
 
 
+class SPKuhnTable(SPHoldemTable, KuhnTable):
+    pass
+
+
 @ray.remote(num_cpus=0)
-class SPKuhnTableActor(SPHoldemTable):
+class SPKuhnTableActor(SPKuhnTable):
     pass

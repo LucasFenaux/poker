@@ -440,3 +440,6 @@ def load_dummy_model(device, deterministic=False, mode="beta", return_logits: bo
     else:
         model = PokerModel(interpreter, deterministic, mode, return_logits).to(device)
     return model
+
+def get_q_model(device, discrete=True, mode="beta") -> Union[PokerModel, HierarchicalPokerModel]:
+    return load_dummy_model(device, deterministic=False, mode=mode, return_logits=True)

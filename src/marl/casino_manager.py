@@ -11,10 +11,10 @@ import torch
 from src.global_settings import NUM_PLAYERS, NUM_TABLES, NUM_TRAINERS, RESOURCE_LIMITED, IS_RECURRENT, ALG, GAME_TYPE
 from src.marl.trainer_actor import TrainerActor
 from src.marl.leaderboard_actor import LeaderboardActor
-from utils.data_storage import DataStorage
-from utils.player_ai import PlayerAI, RNNPlayerAI
+from src.utils.data_storage import DataStorage
+from src.utils.player_ai import PlayerAI, RNNPlayerAI
 from torch.utils.tensorboard import SummaryWriter
-from utils.shared import SemanticTimer
+from src.utils.shared import SemanticTimer
 from src.marl.scheduler import JITTableScheduler
 from src.utils.historical_sampling import HistoricalSampling
 

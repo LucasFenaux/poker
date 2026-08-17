@@ -4,7 +4,7 @@ import ray
 from ray.util.queue import Empty
 import asyncio
 
-from src.global_settings import (HISTORY_LOG_WIDTH, HISTORY_BURN_IN)
+from src.global_settings import (HISTORY_WIDTH, HISTORY_BURN_IN, HISTORICAL_SAMPLING_TYPE)
 from src.utils.player_ai import PlayerAI, RNNPlayerAI
 import glob
 import os
@@ -77,7 +77,12 @@ class HistoricalSampling:
         if player_version < HISTORY_BURN_IN:
             return False
 
-        return player_version % (HISTORY_LOG_WIDTH ** (int(math.log(player_version, HISTORY_LOG_WIDTH)))) == 0
+        if HISTORICAL_SAMPLING_TYPE == "LINEAR":
+            return player_version % HISTORY_WIDTH == 0
+        elif HISTORICAL_SAMPLING_TYPE == "LOG":
+            return player_version % (HISTORY_WIDTH ** (int(math.log(player_version, HISTORY_WIDTH)))) == 0
+        else:
+            raise NotImplementedError
 
     def can_sample(self):
         return self.num_checkpoints > 10
@@ -143,7 +148,7 @@ class HistoricalSampling:
             self.checkpoints[player_id] = [[item, ], ]
         else:
             last_bin = self.checkpoints[player_id][-1]
-            if len(last_bin) >= HISTORY_LOG_WIDTH:
+            if len(last_bin) >= HISTORY_WIDTH:
                 self.checkpoints[player_id].append([item, ])
             else:
                 self.checkpoints[player_id][-1].append(item)
@@ -155,8 +160,8 @@ class HistoricalSampling:
             self.checkpoints[player_id] = [item, ]
         else:
             if ((not isinstance(self.checkpoints[player_id][0], list) and len(
-                    self.checkpoints[player_id]) >= HISTORY_LOG_WIDTH - 1)
-                    or len(self.checkpoints[player_id]) >= HISTORY_LOG_WIDTH):
+                    self.checkpoints[player_id]) >= HISTORY_WIDTH - 1)
+                    or len(self.checkpoints[player_id]) >= HISTORY_WIDTH):
                 # we are either at the lowest level where there are no lists yet or we take into account the list containing the recursion
                 self.checkpoints[player_id] = [self.checkpoints[player_id], item]
             else:

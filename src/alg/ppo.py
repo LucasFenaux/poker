@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.distributions import Categorical, Normal
 import pokerkit
-from utils.models import get_value_model, load_dummy_model
+from src.utils.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
 from .alg import OnPolicyAlgorithm, InferenceWrapper
 
