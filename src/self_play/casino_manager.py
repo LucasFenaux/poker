@@ -90,7 +90,7 @@ class CasinoManager:
             else:
                 # number of transitions
                 if GAME_TYPE == "KUHN":
-                    self.batch_size = 500 if RESOURCE_LIMITED else 40_000
+                    self.batch_size = 500 if RESOURCE_LIMITED else 4_000
                 else:
                     self.batch_size = 5_000 if RESOURCE_LIMITED else 40_000
             self.on_policy = True
