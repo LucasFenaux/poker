@@ -51,7 +51,7 @@ def load_eval_models(model_path, device):
     discrete = True if ALG == "NEURD" else False
     mode = "categorical" if ALG == "NEURD" else "beta"
     
-    policy_net, value_net = alg_class.init_networks(device, mode=mode, discrete=discrete)
+    policy_net, value_net, _ = alg_class.init_networks(device, mode=mode, discrete=discrete)
     wrapper = wrapper_class((policy_net,), discrete=discrete)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)

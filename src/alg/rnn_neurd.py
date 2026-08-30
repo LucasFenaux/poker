@@ -43,7 +43,11 @@ class RNNNeuRD(NeuRD):
         "grad_clip_norm": 0.5,
         "reward_normalization_scaler": 1,
         "entropy_coef": 0.1,
-        "beta": 2.0
+        "beta": 2.0,
+        "critic_update_ratio": 4,
+        "target_network_update_freq": 100,
+        "target_network_reg_weight": 0.01,
+        "logit_penalty_weight": 100.0,
     }
     def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical", discrete=True, **kwargs):
         super(RNNNeuRD, self).__init__(lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode, discrete, **kwargs)
@@ -148,15 +152,32 @@ class RNNNeuRD(NeuRD):
             self.value_optimizer.zero_grad()
             q_dec, q_bet = self._unroll_logits(self.value_network, mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
             
-            # Critic loss: Train Q-network to predict returns for sampled actions
-            q_dec_sampled = torch.gather(q_dec, -1, mb_actions[..., 0].unsqueeze(-1) if q_bet is not None else mb_actions.unsqueeze(-1)).squeeze(-1)
-            v_loss_unreduced_dec = torch.nn.functional.smooth_l1_loss(q_dec_sampled, mb_rewards, reduction="none")
-            value_loss_dec = (v_loss_unreduced_dec * mb_mask).sum() / mb_mask.sum()
+            with torch.no_grad():
+                target_q_dec, target_q_bet = self._unroll_logits(self.target_value_network, mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
+                
+            action_dec_indices = mb_actions[..., 0] if q_bet is not None else mb_actions
+            
+            # 1. Main loss (only on taken actions)
+            q_dec_taken = q_dec.gather(dim=-1, index=action_dec_indices.unsqueeze(-1)).squeeze(-1)
+            
+            main_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec_taken, mb_rewards, reduction="none")
+            main_loss_dec = (main_loss_dec * mb_mask).sum() / mb_mask.sum()
+            
+            reg_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec, target_q_dec, reduction="none")
+            reg_loss_dec = (reg_loss_dec.mean(dim=-1) * mb_mask).sum() / mb_mask.sum()
+            
+            value_loss_dec = main_loss_dec + self.target_network_reg_weight * reg_loss_dec
             
             if q_bet is not None:
-                q_bet_sampled = torch.gather(q_bet, -1, mb_actions[..., 1].unsqueeze(-1)).squeeze(-1)
-                v_loss_unreduced_bet = torch.nn.functional.smooth_l1_loss(q_bet_sampled, mb_rewards, reduction="none")
-                value_loss_bet = (v_loss_unreduced_bet * mb_mask).sum() / mb_mask.sum()
+                q_bet_taken = q_bet.gather(dim=-1, index=mb_actions[..., 1].unsqueeze(-1)).squeeze(-1)
+                
+                main_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet_taken, mb_rewards, reduction="none")
+                main_loss_bet = (main_loss_bet * mb_mask).sum() / mb_mask.sum()
+                
+                reg_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet, target_q_bet, reduction="none")
+                reg_loss_bet = (reg_loss_bet.mean(dim=-1) * mb_mask).sum() / mb_mask.sum()
+                
+                value_loss_bet = main_loss_bet + self.target_network_reg_weight * reg_loss_bet
                 value_loss = value_loss_dec + value_loss_bet
             else:
                 value_loss = value_loss_dec
@@ -170,66 +191,50 @@ class RNNNeuRD(NeuRD):
             with torch.no_grad():
                 old_decision_logits, old_bet_logits = self._unroll_logits(self.network, mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
 
-            # logit clipping
-            # save the current state of the model
-            model_state = {k: v.clone() for k, v in self.network.state_dict().items()}
-            opt_state = copy.deepcopy(self.optimizer.state_dict())
-
-            def policy_update(decision_mask=None, bet_mask=None):
-                # We MUST do a fresh forward pass here so the computational graph is tied to the current weights
+            self.total_update_count += 1
+            if self.total_update_count % self.critic_update_ratio == 0:
                 decision_logits, bet_logits = self._unroll_logits(self.network, mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
                 
-                if decision_mask is None:
-                    decision_mask = torch.ones_like(decision_logits)
-                if bet_logits is not None and bet_mask is None:
-                    bet_mask = torch.ones_like(bet_logits)
                 # Calculate V(s) = sum_a pi(a|s) Q(s,a) to compute advantages for all actions
                 with torch.no_grad():
                     pi_dec = Categorical(logits=decision_logits).probs
                     reg_q_dec = q_dec - self.entropy_coef * torch.log(pi_dec.clamp(min=1e-8))
                     v_dec = torch.sum(pi_dec * reg_q_dec, dim=-1)
                     
-                policy_loss_unreduced_dec = -torch.sum(decision_mask * decision_logits * (reg_q_dec.detach() - v_dec.unsqueeze(-1).detach()), dim=-1)
+                policy_loss_unreduced_dec = -torch.sum(decision_logits * (reg_q_dec.detach() - v_dec.unsqueeze(-1).detach()), dim=-1)
+                bound_penalty_unreduced_dec = torch.nn.functional.relu(decision_logits.abs() - self.beta).pow(2).sum(dim=-1)
 
                 if bet_logits is not None:
                     with torch.no_grad():
                         pi_bet = Categorical(logits=bet_logits).probs
                         reg_q_bet = q_bet - self.entropy_coef * torch.log(pi_bet.clamp(min=1e-8))
                         v_bet = torch.sum(pi_bet * reg_q_bet, dim=-1)
-                    policy_loss_unreduced_bet = -torch.sum(bet_mask * bet_logits * (reg_q_bet.detach() - v_bet.unsqueeze(-1).detach()), dim=-1)
+                    policy_loss_unreduced_bet = -torch.sum(bet_logits * (reg_q_bet.detach() - v_bet.unsqueeze(-1).detach()), dim=-1)
+                    bound_penalty_unreduced_bet = torch.nn.functional.relu(bet_logits.abs() - self.beta).pow(2).sum(dim=-1)
+                    
                     policy_loss_unreduced = policy_loss_unreduced_dec + policy_loss_unreduced_bet
+                    bound_penalty_unreduced = bound_penalty_unreduced_dec + bound_penalty_unreduced_bet
                 else:
                     policy_loss_unreduced = policy_loss_unreduced_dec
+                    bound_penalty_unreduced = bound_penalty_unreduced_dec
 
                 policy_loss = (policy_loss_unreduced * mb_mask).sum() / mb_mask.sum()
+                bound_penalty = (bound_penalty_unreduced * mb_mask).sum() / mb_mask.sum()
+                
+                total_loss = policy_loss + self.logit_penalty_weight * bound_penalty
 
-                if not torch.isfinite(policy_loss):
+                if not torch.isfinite(total_loss):
                     print("WARNING: loss is not finite")
-                policy_loss.backward()
+                    
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
-
                 self.optimizer.step()
-                return policy_loss.item()
-            
-            # compute and apply the update
-            policy_update()
+                policy_loss = policy_loss.item()
+            else:
+                policy_loss = 0.0
 
-            # then we recompute the logits and finds those that exceed the threshold
-            with torch.no_grad():
-                decision_logits, bet_logits = self._unroll_logits(self.network, mb_states_dict, mb_h_0, mb_g_0, mb_new_hands)
-
-                # Mask allows updates if the new logit is in bounds, OR if it's moving towards 0 (healing)
-                mask_dec = ((decision_logits >= -self.beta) & (decision_logits <= self.beta)) | (decision_logits.abs() < old_decision_logits.abs())
-                if bet_logits is not None:
-                    mask_bet = ((bet_logits >= -self.beta) & (bet_logits <= self.beta)) | (bet_logits.abs() < old_bet_logits.abs())
-                else:
-                    mask_bet = None
-
-            # roll-back update
-            self.network.load_state_dict(model_state)
-            self.optimizer.load_state_dict(opt_state)
-            self.optimizer.zero_grad()
-            policy_loss = policy_update(mask_dec, mask_bet)
+            if self.total_update_count % self.target_network_update_freq == 0:
+                self.target_value_network_update()
 
             avg_v_loss += value_loss.item()
             avg_p_loss += policy_loss

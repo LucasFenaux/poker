@@ -528,7 +528,7 @@ class PPOInferenceWrapper(InferenceWrapper):
         self.device = next(self.network.parameters()).device
 
     def load_params(self, param_dicts):
-        network_param_dict, _ = param_dicts
+        network_param_dict = param_dicts[0]
         self.network.load_state_dict(network_param_dict)
 
     def load_network_params(self, params):
