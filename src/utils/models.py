@@ -7,7 +7,7 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 import pokerkit
 from torch.nn import ModuleList
-from src.global_settings import IS_RECURRENT
+from src.global_settings import IS_RECURRENT, GAME_TYPE
 from src.state_interpreter import StateSnapshot
 from src.game_registry import get_current_game_config
 
@@ -45,11 +45,22 @@ class PokerModel(nn.Module):
         self.mode = mode
         self.return_logits = return_logits
 
-        self.embed_net = nn.Sequential(
-            nn.Linear(self.input_dim, 256), nn.GELU(),
-            nn.Linear(256, 128), nn.GELU(),
-            nn.Linear(128, 64), nn.GELU()
-        )
+        if GAME_TYPE == "KUHN":
+            self.embed_dim = 16
+            self.embed_net = nn.Sequential(
+                nn.Linear(self.input_dim, self.embed_dim), nn.GELU(),
+            )
+        elif GAME_TYPE == "HOLDEM":
+            self.embed_dim = 64
+            self.embed_net = nn.Sequential(
+                nn.Linear(self.input_dim, self.embed_dim*4), nn.GELU(),
+                nn.Linear(self.embed_dim*4, self.embed_dim*2), nn.GELU(),
+                nn.Linear(self.embed_dim*2, self.embed_dim), nn.GELU()
+            )
+        else:
+            raise NotImplementedError
+
+
         self.deterministic = deterministic
 
         self.bet_sizing_net = ModuleList()
@@ -60,26 +71,26 @@ class PokerModel(nn.Module):
 
         num_decisions = get_current_game_config()['num_decisions']
         # we assume the first action dim is always the action taken
-        self.action_net = nn.Linear(64, num_decisions)
+        self.action_net = nn.Linear(self.embed_dim, num_decisions)
 
         if action_size > 1:
             remaining_actions = action_size - 1
 
             if self.mode == "normal":
-                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                self.bet_sizing_net.append(nn.Linear(self.embed_dim, remaining_actions))
                 if not deterministic:
-                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    self.bet_sizing_net.append(nn.Linear(self.embed_dim, remaining_actions))
             elif self.mode == "beta":
-                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                self.bet_sizing_net.append(nn.Linear(self.embed_dim, remaining_actions))
                 nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
                 if not self.deterministic:
-                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    self.bet_sizing_net.append(nn.Linear(self.embed_dim, remaining_actions))
                     nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
             elif self.mode == "categorical":
                 # deterministic and categorical -> categorical
                 # need to get the number of discrete actions
                 num_betting_sizes = get_current_game_config()['action_map'].NUM_BETTING_SIZES
-                self.bet_sizing_net.append(nn.Linear(64, num_betting_sizes))
+                self.bet_sizing_net.append(nn.Linear(self.embed_dim, num_betting_sizes))
                 nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
             else:
                 raise NotImplementedError(self.mode)
@@ -180,10 +191,14 @@ class ValueModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
 
-        self.net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
-                                 nn.Linear(256, 128), nn.GELU(),
-                                 nn.Linear(128, 64), nn.GELU(),
-                                 nn.Linear(64, 1))
+        if GAME_TYPE == "KUHN":
+            self.net = nn.Sequential(nn.Linear(self.input_dim, 16), nn.GELU(),
+                                     nn.Linear(16, 1))
+        elif GAME_TYPE == "HOLDEM":
+            self.net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
+                                     nn.Linear(256, 128), nn.GELU(),
+                                     nn.Linear(128, 64), nn.GELU(),
+                                     nn.Linear(64, 1))
 
     def _forward(self, feature_vector: torch.Tensor):
         return self.net(feature_vector)
@@ -217,19 +232,40 @@ class HierarchicalPokerModel(nn.Module):
         self.input_dim = interpreter.expected_input_size()
         self.mode = mode
         self.return_logits = return_logits
-        self.hand_memory_size = 64
-        self.game_memory_size = 32
-        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=self.hand_memory_size)
-        self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
 
-        self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
-                                 nn.Linear(256, 128), nn.GELU(),)
-                                 # nn.Linear(128, 128), nn.GELU(),)
+        if GAME_TYPE == "KUHN":
+            self.hand_memory_size = 8
+            self.game_memory_size = 4
+            self.policy_dim = 16
+            self.embed_dim = 32
 
-        self.policy_mlp = nn.Sequential(
-            nn.Linear(128+64+32, 128), nn.GELU(),
-            nn.Linear(128, 64), nn.GELU()
-        )
+            self.hand_gru = nn.GRUCell(input_size=self.embed_dim, hidden_size=self.hand_memory_size)
+            self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
+
+            self.embed_net = nn.Sequential(nn.Linear(self.input_dim, self.embed_dim), nn.GELU())
+                                     # nn.Linear(128, 128), nn.GELU(),)
+
+            self.policy_mlp = nn.Sequential(
+                nn.Linear(self.embed_dim+self.hand_memory_size+self.game_memory_size, self.policy_dim*2), nn.GELU(),
+                nn.Linear(self.policy_dim*2, self.policy_dim), nn.GELU()
+            )
+        elif GAME_TYPE == "HOLDEM":
+            self.hand_memory_size = 64
+            self.game_memory_size = 32
+            self.policy_dim = 64
+            self.embed_dim = 128
+
+            self.hand_gru = nn.GRUCell(input_size=self.embed_dim, hidden_size=self.hand_memory_size)
+            self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
+
+            self.embed_net = nn.Sequential(nn.Linear(self.input_dim, self.embed_dim*2), nn.GELU(),
+                                     nn.Linear(self.embed_dim*2, self.embed_dim), nn.GELU(),)
+                                     # nn.Linear(128, 128), nn.GELU(),)
+
+            self.policy_mlp = nn.Sequential(
+                nn.Linear(self.embed_dim+self.hand_memory_size+self.game_memory_size, self.policy_dim*2), nn.GELU(),
+                nn.Linear(self.policy_dim*2, self.policy_dim), nn.GELU()
+            )
 
         self.deterministic = deterministic
 
@@ -241,24 +277,24 @@ class HierarchicalPokerModel(nn.Module):
 
         num_decisions = get_current_game_config()['num_decisions']
         # we assume the first action dim is always the action taken
-        self.action_net = nn.Linear(64, num_decisions)
+        self.action_net = nn.Linear(self.policy_dim, num_decisions)
 
         if action_size > 1:
             remaining_actions = action_size - 1
 
             if self.mode == "normal":
-                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                self.bet_sizing_net.append(nn.Linear(self.policy_dim, remaining_actions))
                 if not deterministic:
-                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    self.bet_sizing_net.append(nn.Linear(self.policy_dim, remaining_actions))
             elif self.mode == "beta":
-                self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                self.bet_sizing_net.append(nn.Linear(self.policy_dim, remaining_actions))
                 nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
                 if not self.deterministic:
-                    self.bet_sizing_net.append(nn.Linear(64, remaining_actions))
+                    self.bet_sizing_net.append(nn.Linear(self.policy_dim, remaining_actions))
                     nn.init.constant_(self.bet_sizing_net[1].bias, 1.0)
             elif self.mode == "categorical":
                 num_betting_sizes = get_current_game_config()['action_map'].NUM_BETTING_SIZES
-                self.bet_sizing_net.append(nn.Linear(64, num_betting_sizes))
+                self.bet_sizing_net.append(nn.Linear(self.policy_dim, num_betting_sizes))
                 nn.init.constant_(self.bet_sizing_net[0].bias, 1.0)
             else:
                 raise NotImplementedError(self.mode)
@@ -366,20 +402,43 @@ class HierarchicalValueModel(nn.Module):
         self.interpreter = interpreter
         self.input_dim = interpreter.expected_input_size()
 
-        self.hand_memory_size = 64
-        self.game_memory_size = 32
-        self.hand_gru = nn.GRUCell(input_size=128, hidden_size=self.hand_memory_size)
-        self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
+        if GAME_TYPE == "KUHN":
+            self.hand_memory_size = 8
+            self.game_memory_size = 4
+            self.policy_dim = 16
+            self.embed_dim = 32
 
-        self.embed_net = nn.Sequential(nn.Linear(self.input_dim, 256), nn.GELU(),
-                                 nn.Linear(256, 128), nn.GELU(),)
-                                 # nn.Linear(128, 128), nn.GELU(),)
+            self.hand_gru = nn.GRUCell(input_size=self.embed_dim, hidden_size=self.hand_memory_size)
+            self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
 
-        self.value_head = nn.Sequential(
-            nn.Linear(128+64+32, 128), nn.GELU(),
-            nn.Linear(128, 64), nn.GELU(),
-            nn.Linear(64, 1)
-        )
+            self.embed_net = nn.Sequential(nn.Linear(self.input_dim, self.embed_dim), nn.GELU())
+                                     # nn.Linear(128, 128), nn.GELU(),)
+
+            self.value_head = nn.Sequential(
+                nn.Linear(self.embed_dim+self.hand_memory_size+self.game_memory_size, self.policy_dim), nn.GELU(),
+                nn.Linear(self.policy_dim, 1)
+            )
+
+        elif GAME_TYPE == "HOLDEM":
+            self.hand_memory_size = 64
+            self.game_memory_size = 32
+            self.policy_dim = 64
+            self.embed_dim = 128
+
+            self.hand_gru = nn.GRUCell(input_size=self.embed_dim, hidden_size=self.hand_memory_size)
+            self.game_gru = nn.GRUCell(input_size=self.hand_memory_size, hidden_size=self.game_memory_size)
+
+            self.embed_net = nn.Sequential(nn.Linear(self.input_dim, self.embed_dim*2), nn.GELU(),
+                                     nn.Linear(self.embed_dim*2, self.embed_dim), nn.GELU(),)
+                                     # nn.Linear(128, 128), nn.GELU(),)
+
+            self.value_head = nn.Sequential(
+                nn.Linear(self.embed_dim+self.hand_memory_size+self.game_memory_size, self.policy_dim*2), nn.GELU(),
+                nn.Linear(self.policy_dim*2, self.policy_dim), nn.GELU(),
+                nn.Linear(self.policy_dim, 1)
+            )
+
+
 
     def update_game_memory(self, final_hand_hidden: torch.Tensor, current_game_hidden: torch.Tensor):
         return self.game_gru(final_hand_hidden, current_game_hidden)

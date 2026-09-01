@@ -18,7 +18,8 @@ class NeuRD(OnPolicyAlgorithm):
         "beta": 2.0,  # openspiel uses this as default
         "critic_update_ratio": 4, # NeuRD paper uses 4 updates to Q for every 1 to Policy
         "target_network_update_freq": 100,
-        "target_network_reg_weight": 0.01,
+        # "target_network_reg_weight": 0.01,
+        "target_network_reg_weight": 0.,
         "logit_penalty_weight": 100.0,
     }
     def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, entropy_coef,

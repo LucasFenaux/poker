@@ -275,23 +275,39 @@ def evaluate():
 
     scheme_probs = {}
     for scheme_name, weight_fn in weighting_schemes.items():
-        total_weight = 0.0
         agg = {}
         for is_current, version, model_id, m_probs in model_evaluations:
             w = weight_fn(is_current, version, model_id)
             if w <= 0:
                 continue
-            total_weight += w
+            
             for info_state, probs_dict in m_probs.items():
+                # Compute reach probability for this specific model and info_state
+                reach_prob = 1.0
+                if len(info_state) == 3 and info_state.endswith('hb'):
+                    # P1's second action. Reach prob is P1's prob of checking ('h') at the first action.
+                    card = info_state[0]
+                    reach_prob = m_probs[card]["check_fold"]
+                
+                weight = w * reach_prob
+                
                 if info_state not in agg:
-                    agg[info_state] = {"raise": 0.0, "check_fold": 0.0}
-                agg[info_state]["raise"] += probs_dict["raise"] * w
-                agg[info_state]["check_fold"] += probs_dict["check_fold"] * w
+                    agg[info_state] = {"raise": 0.0, "check_fold": 0.0, "weight_sum": 0.0}
+                
+                agg[info_state]["raise"] += probs_dict["raise"] * weight
+                agg[info_state]["check_fold"] += probs_dict["check_fold"] * weight
+                agg[info_state]["weight_sum"] += weight
         
-        if total_weight > 0:
-            for info_state in agg:
-                agg[info_state]["raise"] /= total_weight
-                agg[info_state]["check_fold"] /= total_weight
+        for info_state in agg:
+            weight_sum = agg[info_state]["weight_sum"]
+            if weight_sum > 0:
+                agg[info_state]["raise"] /= weight_sum
+                agg[info_state]["check_fold"] /= weight_sum
+            else:
+                # Fallback to uniform if reach probability sum is exactly 0
+                agg[info_state]["raise"] = 0.5
+                agg[info_state]["check_fold"] = 0.5
+                
         scheme_probs[scheme_name] = agg
 
     num_models = len(model_evaluations)
