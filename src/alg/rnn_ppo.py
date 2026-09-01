@@ -1,14 +1,11 @@
 
 from typing import Union
-import numpy as np
 import torch
 from torch.distributions import Categorical, Normal
 import pokerkit
 from torch.nn.utils.rnn import pad_sequence
-from src.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
-from src.state_interpreter import safe_log, safe_lin_sqrt
-from src.models import HierarchicalPokerModel
+from src.utils.models import HierarchicalPokerModel
 from torch.distributions.beta import Beta
 from .ppo import PPO, PPOInferenceWrapper
 
@@ -34,7 +31,8 @@ class RNNPPOInferenceWrapper(PPOInferenceWrapper):
         if current_game_hidden is not None:
             current_game_hidden = current_game_hidden.to(self.device)
 
-        new_game_hidden = self.network.update_game_memory(final_hand_hidden, current_game_hidden)
+        with torch.no_grad():
+            new_game_hidden = self.network.update_game_memory(final_hand_hidden, current_game_hidden)
         # FIX: Detach and send to CPU to prevent massive GPU memory leaks in TableActor
         return new_game_hidden.detach().cpu()
 
@@ -73,8 +71,9 @@ class RNNPPOInferenceWrapper(PPOInferenceWrapper):
             game_hidden = game_hidden.to(self.device)
 
         # Retrieve logits/distribution alongside the updated RNN memory
-        (action_dist, bet_sizing_dist), new_hand_hidden = network(*state_args, hand_hidden=hand_hidden,
-                                                                  game_hidden=game_hidden)
+        with torch.no_grad():
+            (action_dist, bet_sizing_dist), new_hand_hidden = network(*state_args, hand_hidden=hand_hidden,
+                                                                      game_hidden=game_hidden)
         return (action_dist, bet_sizing_dist), new_hand_hidden
 
 

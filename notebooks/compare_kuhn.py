@@ -51,7 +51,7 @@ def load_eval_models(model_path, device):
     discrete = True if ALG == "NEURD" else False
     mode = "categorical" if ALG == "NEURD" else "beta"
     
-    policy_net, value_net = alg_class.init_networks(device, mode=mode, discrete=discrete)
+    policy_net, value_net, _ = alg_class.init_networks(device, mode=mode, discrete=discrete)
     wrapper = wrapper_class((policy_net,), discrete=discrete)
 
     loaded_data = torch.load(model_path, map_location=device, weights_only=True)
@@ -249,7 +249,7 @@ def evaluate():
     specific_model_id = None  # Set this to any current model ID to add a dedicated column for it
 
     import math
-    from src.global_settings import HISTORY_LOG_WIDTH
+    from src.global_settings import HISTORY_WIDTH
 
     def get_exp_weight(is_curr, ver, m_id):
         if ver <= 0:
@@ -257,8 +257,8 @@ def evaluate():
         if is_curr:
             return 1.0
         try:
-            k = int(math.log(ver, HISTORY_LOG_WIDTH))
-            return float(HISTORY_LOG_WIDTH ** k)
+            k = int(math.log(ver, HISTORY_WIDTH))
+            return float(HISTORY_WIDTH ** k)
         except ValueError:
             return 1.0
 
@@ -275,23 +275,39 @@ def evaluate():
 
     scheme_probs = {}
     for scheme_name, weight_fn in weighting_schemes.items():
-        total_weight = 0.0
         agg = {}
         for is_current, version, model_id, m_probs in model_evaluations:
             w = weight_fn(is_current, version, model_id)
             if w <= 0:
                 continue
-            total_weight += w
+            
             for info_state, probs_dict in m_probs.items():
+                # Compute reach probability for this specific model and info_state
+                reach_prob = 1.0
+                if len(info_state) == 3 and info_state.endswith('hb'):
+                    # P1's second action. Reach prob is P1's prob of checking ('h') at the first action.
+                    card = info_state[0]
+                    reach_prob = m_probs[card]["check_fold"]
+                
+                weight = w * reach_prob
+                
                 if info_state not in agg:
-                    agg[info_state] = {"raise": 0.0, "check_fold": 0.0}
-                agg[info_state]["raise"] += probs_dict["raise"] * w
-                agg[info_state]["check_fold"] += probs_dict["check_fold"] * w
+                    agg[info_state] = {"raise": 0.0, "check_fold": 0.0, "weight_sum": 0.0}
+                
+                agg[info_state]["raise"] += probs_dict["raise"] * weight
+                agg[info_state]["check_fold"] += probs_dict["check_fold"] * weight
+                agg[info_state]["weight_sum"] += weight
         
-        if total_weight > 0:
-            for info_state in agg:
-                agg[info_state]["raise"] /= total_weight
-                agg[info_state]["check_fold"] /= total_weight
+        for info_state in agg:
+            weight_sum = agg[info_state]["weight_sum"]
+            if weight_sum > 0:
+                agg[info_state]["raise"] /= weight_sum
+                agg[info_state]["check_fold"] /= weight_sum
+            else:
+                # Fallback to uniform if reach probability sum is exactly 0
+                agg[info_state]["raise"] = 0.5
+                agg[info_state]["check_fold"] = 0.5
+                
         scheme_probs[scheme_name] = agg
 
     num_models = len(model_evaluations)
@@ -318,6 +334,7 @@ def evaluate():
     print(divider)
     
     mae_totals = {scheme: 0.0 for scheme in weighting_schemes}
+    valid_decisions = {scheme: 0 for scheme in weighting_schemes}
     num_decisions = 0
 
     for player_obj in [cfr_p1, cfr_p2]:
@@ -336,10 +353,14 @@ def evaluate():
                 
                 row_str = f"{str(info_state):<8} | {action_name:<10} | {cfr_prob*100:>6.2f}%"
                 for scheme_name in weighting_schemes:
-                    ppo_prob = scheme_probs[scheme_name][str(info_state)][prob_key]
-                    colored = color_prob(ppo_prob, cfr_prob)
-                    row_str += f" | {colored}"
-                    mae_totals[scheme_name] += abs(cfr_prob - ppo_prob)
+                    if str(info_state) in scheme_probs[scheme_name]:
+                        ppo_prob = scheme_probs[scheme_name][str(info_state)][prob_key]
+                        colored = color_prob(ppo_prob, cfr_prob)
+                        row_str += f" | {colored}"
+                        mae_totals[scheme_name] += abs(cfr_prob - ppo_prob)
+                        valid_decisions[scheme_name] += 1
+                    else:
+                        row_str += f" | {'N/A':<6}"
                 
                 num_decisions += 1
                 print(row_str)
@@ -348,8 +369,12 @@ def evaluate():
     if num_decisions > 0:
         mae_str = f"{'MAE vs':<8} | {'CFR':<10} | {'0.00%':<8}"
         for scheme_name in weighting_schemes:
-            mae_val = (mae_totals[scheme_name] / num_decisions) * 100
-            mae_str += f" | {mae_val:>6.2f}%"
+            vd = valid_decisions[scheme_name]
+            if vd > 0:
+                mae_val = (mae_totals[scheme_name] / vd) * 100
+                mae_str += f" | {mae_val:>6.2f}%"
+            else:
+                mae_str += f" | {'N/A':>7}"
         print(mae_str)
         print("=" * len(header) + "\n")
 

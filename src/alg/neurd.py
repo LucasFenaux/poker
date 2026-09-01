@@ -1,12 +1,8 @@
-from typing import Union
 import numpy as np
 import torch
-from pip._internal import network
-from torch.distributions import Categorical, Normal
-import pokerkit
-from src.models import get_value_model, load_dummy_model
-from src.action_interpreter import Action
-from . import PPOInferenceWrapper
+import copy
+from torch.distributions import Categorical
+from src.utils.models import load_dummy_model, get_q_model
 from .alg import OnPolicyAlgorithm
 from .ppo import PPOInferenceWrapper
 
@@ -14,49 +10,68 @@ from .ppo import PPOInferenceWrapper
 class NeuRD(OnPolicyAlgorithm):
     default_hyperparameters = {
         "mini_batch_size": 500,
-        "lr": 1e-4,
-        "value_lr": 5e-4,
+        "lr": 2e-3,
+        "value_lr": 1e-2,
         "grad_clip_norm": 0.5,
         "reward_normalization_scaler": 1,
+        "entropy_coef": 0.01,
+        "beta": 2.0,  # openspiel uses this as default
+        "critic_update_ratio": 4, # NeuRD paper uses 4 updates to Q for every 1 to Policy
+        "target_network_update_freq": 100,
+        # "target_network_reg_weight": 0.01,
+        "target_network_reg_weight": 0.,
+        "logit_penalty_weight": 100.0,
     }
-    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, mode="categorical",
+    def __init__(self, lr, device, value_lr, reward_normalization_scaler, grad_clip_norm, mini_batch_size, entropy_coef,
+                 beta, critic_update_ratio, target_network_update_freq, target_network_reg_weight, logit_penalty_weight, mode="categorical",
                  discrete=True, **kwargs):
         super(NeuRD, self).__init__(lr, device)
-        self.mini_batch_size =mini_batch_size
+        self.mini_batch_size = mini_batch_size
         self.value_lr = value_lr
         self.grad_clip_norm = grad_clip_norm
+        self.entropy_coef = entropy_coef
+        self.beta = beta
+        self.critic_update_ratio = critic_update_ratio
+        self.target_network_update_freq = target_network_update_freq
+        self.target_network_reg_weight = target_network_reg_weight
+        self.logit_penalty_weight = logit_penalty_weight
+        self.total_update_count = 0
         self.mode = mode
         self.discrete = discrete
         assert self.mode == "categorical"  # only mode supported for neurd
         assert self.discrete   # does not support continuous actions
-        network, value_network = self.init_networks(device, discrete, mode)
+        network, value_network, target_value_network = self.init_networks(device, discrete, mode)
         self.network = network
         self.value_network = value_network
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
-        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        self.target_value_network = target_value_network
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
+        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
         self.reward_normalization_scaler = reward_normalization_scaler
         self.mini_batch_size = mini_batch_size
 
     @staticmethod
     def init_networks(device, discrete, mode):
         network = load_dummy_model(device, discrete, mode, return_logits=True)  # need logits NeuRD policy loss
-        value_network = get_value_model(device)
-        return network, value_network
+        value_network = get_q_model(device, discrete, mode)
+        target_value_network = get_q_model(device, discrete, mode)
+        return network, value_network, target_value_network
 
     def set_network(self, network):
         self.network = network
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
     def get_network(self):
         return self.network
 
     def load_params(self, param_dicts):
-        network_param_dict, value_param_dict = param_dicts
+        network_param_dict, value_param_dict, target_network_dict = param_dicts
         self.network.load_state_dict(network_param_dict)
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.SGD(self.network.parameters(), lr=self.lr)
 
         self.value_network.load_state_dict(value_param_dict)
-        self.value_optimizer = torch.optim.Adam(self.value_network.parameters(), lr=self.value_lr)
+        self.value_optimizer = torch.optim.SGD(self.value_network.parameters(), lr=self.value_lr)
+
+        self.target_value_network.load_state_dict(value_param_dict)
 
     def load_optimizer_params(self, optimizer_params):
         network_opt_params, value_opt_params = optimizer_params
@@ -69,7 +84,7 @@ class NeuRD(OnPolicyAlgorithm):
             param_group['lr'] = self.value_lr
 
     def get_params(self):
-        return [self.network.state_dict(), self.value_network.state_dict()]
+        return [self.network.state_dict(), self.value_network.state_dict(), self.target_value_network.state_dict()]
 
     def get_optimizer_params(self):
         return [self.optimizer.state_dict(), self.value_optimizer.state_dict()]
@@ -96,6 +111,9 @@ class NeuRD(OnPolicyAlgorithm):
             else:
                 tensor_dict[k] = torch.tensor(v, dtype=torch.float32, device=self.device)
         return tensor_dict
+
+    def target_value_network_update(self):
+        self.target_value_network.load_state_dict(self.value_network.state_dict())
 
     def update(self, batch_states, batch_rewards, batch_actions, batch_rnn_states=None, sample_weights=None, *args,
                **kwargs):
@@ -126,11 +144,6 @@ class NeuRD(OnPolicyAlgorithm):
             sample_weights = torch.tensor(sample_weights, device=self.device)
             assert sample_weights.dim() == 1
             normalized_sample_weights = sample_weights / sample_weights.mean()
-            prob_sample_weights = sample_weights / sample_weights.sum()
-
-        with torch.no_grad():
-            value_function = self.value_network(*states).squeeze(-1)
-            advantages = batch_rewards - value_function.clone().detach()
 
         count = 0
         avg_v_loss = 0
@@ -142,55 +155,106 @@ class NeuRD(OnPolicyAlgorithm):
             mini_batch_dict = {k: v[mini_batch_indices] for k, v in states[0].items()}
             mini_batch_states = (mini_batch_dict,)
             mini_batch_rewards = batch_rewards[mini_batch_indices]
-            mini_batch_advantages = advantages[mini_batch_indices]
             mini_batch_actions = actions[mini_batch_indices]
 
             if sample_weights is not None:
                 mini_batch_sample_weights = normalized_sample_weights[mini_batch_indices]
 
             self.value_optimizer.zero_grad()
-            value_function = self.value_network(*mini_batch_states).squeeze(-1)
+            q_dec, q_bet = self.value_network(*mini_batch_states)
+
+            with torch.no_grad():
+                target_q_dec, target_q_bet = self.target_value_network(*mini_batch_states)
+
+            # 1. Main loss (only on taken actions)
+            action_dec_indices = mini_batch_actions[..., 0] if q_bet is not None else mini_batch_actions
+            q_dec_taken = q_dec.gather(dim=-1, index=action_dec_indices.unsqueeze(-1)).squeeze(-1)
+            
             if sample_weights is None:
-                value_loss = torch.nn.functional.smooth_l1_loss(value_function, mini_batch_rewards)
+                main_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec_taken, mini_batch_rewards)
+                reg_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec, target_q_dec)
             else:
-                value_loss = torch.nn.functional.smooth_l1_loss(value_function, mini_batch_rewards,
-                                                                reduction="none")
-                value_loss = (value_loss * mini_batch_sample_weights).mean()
+                main_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec_taken, mini_batch_rewards, reduction="none")
+                main_loss_dec = (main_loss_dec * mini_batch_sample_weights).mean()
+                reg_loss_dec = torch.nn.functional.smooth_l1_loss(q_dec, target_q_dec, reduction="none")
+                reg_loss_dec = (reg_loss_dec.mean(dim=-1) * mini_batch_sample_weights).mean()
+                
+            value_loss_dec = main_loss_dec + self.target_network_reg_weight * reg_loss_dec
+
+            if q_bet is not None:
+                q_bet_taken = q_bet.gather(dim=-1, index=mini_batch_actions[..., 1].unsqueeze(-1)).squeeze(-1)
+                
+                if sample_weights is None:
+                    main_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet_taken, mini_batch_rewards)
+                    reg_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet, target_q_bet)
+                else:
+                    main_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet_taken, mini_batch_rewards, reduction="none")
+                    main_loss_bet = (main_loss_bet * mini_batch_sample_weights).mean()
+                    reg_loss_bet = torch.nn.functional.smooth_l1_loss(q_bet, target_q_bet, reduction="none")
+                    reg_loss_bet = (reg_loss_bet.mean(dim=-1) * mini_batch_sample_weights).mean()
+                    
+                value_loss_bet = main_loss_bet + self.target_network_reg_weight * reg_loss_bet
+                value_loss = value_loss_dec + value_loss_bet
+            else:
+                value_loss = value_loss_dec
+
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.value_network.parameters(), self.grad_clip_norm)
             self.value_optimizer.step()
 
-            self.optimizer.zero_grad()
+            self.total_update_count += 1
+            if self.total_update_count % self.critic_update_ratio == 0:
+                self.optimizer.zero_grad()
+                
+                decision_logits, bet_logits = self.get_model_logits(self.network, mini_batch_states)
+                
+                # Calculate V(s) = sum_a pi(a|s) Q(s,a) to compute advantages for all actions
+                with torch.no_grad():
+                    pi_dec = Categorical(logits=decision_logits).probs
+                    # Paper Section 4: "we use entropy regularization applied to the action-values q"
+                    # This prevents the policy from collapsing into deterministic strategies!
+                    reg_q_dec = q_dec - self.entropy_coef * torch.log(pi_dec.clamp(min=1e-8))
+                    v_dec = torch.sum(pi_dec * reg_q_dec, dim=-1)
 
-            decision_logits, bet_logits = self.get_model_logits(self.network, mini_batch_states)
+                policy_loss_dec = -torch.sum(decision_logits * (reg_q_dec.detach() - v_dec.unsqueeze(-1).detach()), dim=-1)
+                
+                # L2 Penalty to bound logits to [-beta, beta] instead of Tabular zero-gradient masking
+                bound_penalty_dec = torch.nn.functional.relu(decision_logits.abs() - self.beta).pow(2).sum(dim=-1)
 
-            if bet_logits is not None:
-                decision_actions = mini_batch_actions[..., 0].unsqueeze(-1)
-                # we need to gather the logits by action since the neuRD loss is y(a, \theta)*advantage
-                decision_logits = torch.gather(decision_logits, -1, decision_actions)
-                bet_actions = mini_batch_actions[..., 1].unsqueeze(-1)
-                bet_logits = torch.gather(bet_logits, -1, bet_actions)
-                logits = torch.cat((decision_logits, bet_logits), dim=-1)  # concatenate along the logit dimension, not the batch dim
+                if bet_logits is not None:
+                    with torch.no_grad():
+                        pi_bet = Categorical(logits=bet_logits).probs
+                        reg_q_bet = q_bet - self.entropy_coef * torch.log(pi_bet.clamp(min=1e-8))
+                        v_bet = torch.sum(pi_bet * reg_q_bet, dim=-1)
+
+                    policy_loss_bet = -torch.sum(bet_logits * (reg_q_bet.detach() - v_bet.unsqueeze(-1).detach()), dim=-1)
+                    bound_penalty_bet = torch.nn.functional.relu(bet_logits.abs() - self.beta).pow(2).sum(dim=-1)
+
+                    if sample_weights is None:
+                        policy_loss = policy_loss_dec.mean() + policy_loss_bet.mean() + self.logit_penalty_weight * (bound_penalty_dec.mean() + bound_penalty_bet.mean())
+                    else:
+                        policy_loss = (policy_loss_dec * mini_batch_sample_weights).mean() + (policy_loss_bet * mini_batch_sample_weights).mean() + self.logit_penalty_weight * ((bound_penalty_dec * mini_batch_sample_weights).mean() + (bound_penalty_bet * mini_batch_sample_weights).mean())
+                else:
+                    if sample_weights is None:
+                        policy_loss = policy_loss_dec.mean() + self.logit_penalty_weight * bound_penalty_dec.mean()
+                    else:
+                        policy_loss = (policy_loss_dec * mini_batch_sample_weights).mean() + self.logit_penalty_weight * (bound_penalty_dec * mini_batch_sample_weights).mean()
+
+                if not torch.isfinite(policy_loss):
+                    print("WARNING: loss is not finite")
+                    
+                policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
+                self.optimizer.step()
+                policy_loss = policy_loss.item()
             else:
-                decision_actions = mini_batch_actions.unsqueeze(-1)
-                decision_logits = torch.gather(decision_logits, -1, decision_actions)
-                logits = decision_logits
+                policy_loss = 0.0
 
-            policy_loss = -logits * mini_batch_advantages.unsqueeze(-1)  # - for gradient ascent
+            if self.total_update_count % self.target_network_update_freq == 0:
+                self.target_value_network_update()
 
-            if sample_weights is None:
-                policy_loss = policy_loss.mean()
-            else:
-                policy_loss = (policy_loss * mini_batch_sample_weights).mean()
-
-            if not torch.isfinite(policy_loss):
-                print("WARNING: loss is not finite")
-            policy_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip_norm)
-
-            self.optimizer.step()
             avg_v_loss += value_loss.item()
-            avg_p_loss += policy_loss.item()
+            avg_p_loss += policy_loss
             count += 1
 
         if count != 0:

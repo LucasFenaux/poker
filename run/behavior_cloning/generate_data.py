@@ -4,11 +4,10 @@ import glob
 import pickle
 from queue import Empty
 from ray.util.queue import Queue
-from pokerkit import Automation
 from src.game_registry import get_current_game_config
 from src.action_interpreter import to_exact_fraction, Action
 from src.state_interpreter import extract_state_snapshot
-from src.baseline_model import FastBaselineBot, get_valid_actions_dict
+from utils.baseline_model import FastBaselineBot, get_valid_actions_dict
 from src.global_settings import IS_RECURRENT
 
 CHUNK_SIZE = 100

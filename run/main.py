@@ -4,8 +4,9 @@ import torch
 from datetime import datetime
 import uuid
 
-from src.self_play.casino_manager import CasinoManager
-from src.global_settings import IS_RECURRENT
+from src.marl.casino_manager import CasinoManager as MARLCasinoManager
+from src.self_play.casino_manager import CasinoManager as SelfPlayCasinoManager
+from src.global_settings import IS_RECURRENT, TYPE
 
 
 def get_save_folder(base_path="results"):
@@ -56,12 +57,20 @@ if __name__ == '__main__':
         else:
             save_folder = get_save_folder()
 
-        if GAME_TYPE == "KUHN":
-            bc_pretrained_model_path = None
+        # if GAME_TYPE == "KUHN":
+        #     bc_pretrained_model_path = None
+        # else:
+        #     bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
+
+        if TYPE == "SELF_PLAY":
+           CasinoManager = SelfPlayCasinoManager
+        elif TYPE == "MARL":
+            CasinoManager = MARLCasinoManager
         else:
-            bc_pretrained_model_path = f"bc_pretrained_model_no_log_{GAME_TYPE}_{'rnn' if IS_RECURRENT else 'no_mem'}.pt"
+            raise NotImplementedError
+
         manager: CasinoManager = CasinoManager(device, save_folder=save_folder,
-                                               bc_pretrained_model_path=bc_pretrained_model_path,
+                                               # bc_pretrained_model_path=bc_pretrained_model_path,
                                                resume=resume)
         manager.start()
         ray.shutdown()

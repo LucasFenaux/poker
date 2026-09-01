@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.distributions import Categorical, Normal
 import pokerkit
-from src.models import get_value_model, load_dummy_model
+from src.utils.models import get_value_model, load_dummy_model
 from src.action_interpreter import Action
 from .alg import OnPolicyAlgorithm, InferenceWrapper
 
@@ -528,7 +528,7 @@ class PPOInferenceWrapper(InferenceWrapper):
         self.device = next(self.network.parameters()).device
 
     def load_params(self, param_dicts):
-        network_param_dict, _ = param_dicts
+        network_param_dict = param_dicts[0]
         self.network.load_state_dict(network_param_dict)
 
     def load_network_params(self, params):

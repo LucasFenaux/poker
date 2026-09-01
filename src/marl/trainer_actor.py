@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from src.global_settings import IS_RECURRENT
 from src.game_registry import get_current_game_config
 from src.game_registry import get_current_game_hyperparameters
-from src.self_play.scheduler import HistoricalSampling
+from src.utils.historical_sampling import HistoricalSampling
 
 
 @ray.remote(num_cpus=1)

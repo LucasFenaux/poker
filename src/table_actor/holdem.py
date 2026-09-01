@@ -11,12 +11,12 @@ import random
 import torch
 from src.action_interpreter import Action
 from src.state_interpreter import extract_state_snapshot
-from src.player_ai import PlayerAI, RNNPlayerAI
-from src.shared import SemanticTimer
-from src.global_settings import IS_RECURRENT
+from src.utils.player_ai import PlayerAI, RNNPlayerAI
+from src.utils.shared import SemanticTimer
+from src.global_settings import IS_RECURRENT, USE_HISTORICAL_SAMPLING, HISTORICAL_SAMPLING_RATE
 from .table_actor import BaseTable
 import traceback
-
+import asyncio
 
 
 
@@ -738,5 +738,144 @@ class HoldemTable(BaseTable):
 
 
 @ray.remote(num_cpus=0)
-class HoldemTableActor(HoldemTable):
+class MARLHoldemTableActor(HoldemTable):
+    pass
+
+
+class SPHoldemTable(HoldemTable):
+    def __init__(self, table_id, device, in_queue: Queue, out_queue: Queue,
+                 historical_sampling_receive_queue: Queue,
+                 max_table_size: int, discrete: bool,
+                 model_mode: str, batch_size: int, log_folder: str, player):
+        super().__init__(table_id, device, in_queue, out_queue, historical_sampling_receive_queue, max_table_size,
+                         discrete, model_mode, batch_size, log_folder)
+        self.interrupt = False
+        self.player = player
+
+    async def stop(self):
+        self.interrupt = True
+
+    async def update_table(self, model_params, optim_params):
+        self.player.load_params(model_params)
+        self.player.load_optimizers(optim_params)
+
+    async def start(self):
+        self.interrupt = False
+        if self.mode == "linear":
+            self._play_round = self._play_linear_round
+        elif self.mode == "tree":
+            self._play_round = self._play_tree_round
+        else:
+            raise NotImplementedError(self.mode)
+        from src.game_registry import get_current_game_config
+        game_config = get_current_game_config()
+        table_param_generator = game_config['table_param_generator']
+
+        while not self.interrupt:
+            await asyncio.sleep(0.001)  # microsleep to catch stops
+            table_size = random.randint(2, self.max_table_size)
+            players = [self.player]
+            player_ids = [0, ]
+            regular_player_ids = [0, ]
+            for i in range(1, table_size):
+                added_historical = False
+                if USE_HISTORICAL_SAMPLING:
+                    if random.random() < HISTORICAL_SAMPLING_RATE:
+                        try:
+                            hist_player_ref = self.historical_sampling_receive_queue.get_nowait()["ref"]
+                            players.append(ray.get(hist_player_ref))
+                            player_ids.append(-i)
+                            added_historical = True
+                        except Empty:
+                            pass
+                if not added_historical:
+                    players.append(self.player)
+                    player_ids.append(i)
+                    regular_player_ids.append(i)
+            try:
+
+                session_hand_info = {
+                    pid: {"states": [], "current_actors": [], "actions": [], "rewards": [], "sample_weights": [],
+                          "hand_memories": [], "game_memories": [], "new_hands": []}
+                    for pid in regular_player_ids
+                }
+                session_player_winnings = {pid: 0.0 for pid in regular_player_ids}
+
+                table_params = table_param_generator(
+                    table_size=table_size,
+                )
+
+                for _ in range(self.replay):
+                    shuffle = list(range(len(player_ids)))
+                    random.shuffle(shuffle)
+                    # shuffled_player_params_list = [player_params_list[i] for i in shuffle]
+                    shuffled_players = [players[i] for i in shuffle]
+                    shuffled_player_ids = [player_ids[i] for i in shuffle]
+                    self.reset(shuffled_players, shuffled_player_ids, **table_params)
+                    success = self.play_game()
+
+                    if success:
+                        # Aggregate data into the session accumulators
+                        for pid in player_ids:
+                            # need to make sure we only look at actual players
+                            if pid < 0: continue
+
+                            if IS_RECURRENT:
+                                # we again append rather than extend to keep the per-game structure
+                                # so for recurrent models, the structure becomes [per_game[per_hand[]]]
+                                session_hand_info[pid]["states"].append(self.hand_info[pid]["states"])
+                                session_hand_info[pid]["current_actors"].append(
+                                    self.hand_info[pid]["current_actors"])
+                                session_hand_info[pid]["actions"].append(self.hand_info[pid]["actions"])
+                                session_hand_info[pid]["rewards"].append(self.hand_info[pid]["rewards"])
+                                session_hand_info[pid]["sample_weights"].append(
+                                    self.hand_info[pid]["sample_weights"])
+                                session_hand_info[pid]["hand_memories"].append(self.hand_info[pid]["hand_memories"])
+                                session_hand_info[pid]["game_memories"].append(self.hand_info[pid]["game_memories"])
+                                session_hand_info[pid]["new_hands"].append(self.hand_info[pid]["new_hands"])
+                            else:
+                                session_hand_info[pid]["states"].extend(self.hand_info[pid]["states"])
+                                session_hand_info[pid]["current_actors"].extend(
+                                    self.hand_info[pid]["current_actors"])
+                                session_hand_info[pid]["actions"].extend(self.hand_info[pid]["actions"])
+                                session_hand_info[pid]["rewards"].extend(self.hand_info[pid]["rewards"])
+                                session_hand_info[pid]["sample_weights"].extend(
+                                    self.hand_info[pid]["sample_weights"])
+                                session_hand_info[pid]["hand_memories"].extend(self.hand_info[pid]["hand_memories"])
+                                session_hand_info[pid]["game_memories"].extend(
+                                    [self.hand_info[pid]["game_memories"], ])
+                                session_hand_info[pid]["new_hands"].extend(self.hand_info[pid]["new_hands"])
+                            session_player_winnings[pid] += self.player_winnings[pid]
+
+                batch = []
+                # Send the batched data exactly once per session
+                for pid in player_ids:
+                    if pid < 0: continue  # only regular players get sent back
+
+                    if IS_RECURRENT:
+                        # num_samples = sum([len(session_hand_info[pid]["states"][i]) for i in range(len(session_hand_info[pid]["states"]))])
+                        num_samples = sum([1 for _ in range(len(session_hand_info[pid]["states"]))])
+                    else:
+                        num_samples = len(session_hand_info[pid]["states"])
+
+                    batch.append({
+                        "type": "data",
+                        "table_id": self.table_id,
+                        "player_id": pid,
+                        "hand_info": ray.put(session_hand_info[pid]),
+                        "player_winnings": session_player_winnings[pid],
+                        "num_samples": num_samples,
+                        "num_games": self.replay,
+                    })
+
+                self.out_queue.put_nowait_batch(batch)
+
+            except Exception as e:
+                print(f"Exception: {e} encountered in Table {self.table_id} in start fn")
+                if self.table_id == 0:
+                    traceback.print_exc()
+
+
+@ray.remote(num_cpus=0)
+class SPHoldemTableActor(SPHoldemTable):
     pass

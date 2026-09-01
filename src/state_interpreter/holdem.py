@@ -6,7 +6,7 @@ from src.global_settings import MAX_TABLE_SIZE
 from src.state_interpreter.state_interpreter import StateInterpreter, StatePreprocessor, StateSnapshot, extract_state_snapshot,safe_div, safe_lin_sqrt
 
 
-class HoldemStatePreprocessor:
+class HoldemStatePreprocessor(StatePreprocessor):
 
     def process(self, state: Union[pokerkit.State, StateSnapshot], current_actor: int) -> Dict[str, list]:
         if isinstance(state, StateSnapshot):
